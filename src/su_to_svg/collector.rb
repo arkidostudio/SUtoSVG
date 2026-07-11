@@ -27,29 +27,44 @@ module SUtoSVG
 
     # entities : anything that responds to #each yielding Sketchup::Entity
     #            (a Selection, Entities, or Array).
-    # Returns { faces: Array<WorldFace>, edges: Array<WorldEdge> }.
+    # Returns { faces:, edges:, shadow_faces:, shadow_edges: }. Geometry inside a
+    # TIG-shadowProjector group is routed to the shadow_* buckets so it can be
+    # drawn as a separate SVG layer instead of the normal line drawing.
     def collect(entities, transform = Geom::Transformation.new)
-      out = { faces: [], edges: [] }
-      walk(entities, transform, out)
+      out = { faces: [], edges: [], shadow_faces: [], shadow_edges: [] }
+      walk(entities, transform, out, false)
       out
     end
 
-    def walk(entities, tr, out)
+    def walk(entities, tr, out, shadow)
       entities.each do |e|
         case e
         when Sketchup::Face
-          out[:faces] << build_face(e, tr)
+          (shadow ? out[:shadow_faces] : out[:faces]) << build_face(e, tr)
         when Sketchup::Edge
-          normals = e.faces.map { |f| f.normal.transform(tr) }
-          out[:edges] << WorldEdge.new(e.start.position.transform(tr),
-                                       e.end.position.transform(tr),
-                                       normals)
+          normals = shadow ? [] : e.faces.map { |f| f.normal.transform(tr) }
+          rec = WorldEdge.new(e.start.position.transform(tr),
+                              e.end.position.transform(tr), normals)
+          (shadow ? out[:shadow_edges] : out[:edges]) << rec
         when Sketchup::Group
-          walk(e.entities, tr * e.transformation, out)
+          descend(e, e.entities, tr, out, shadow)
         when Sketchup::ComponentInstance
-          walk(e.definition.entities, tr * e.transformation, out)
+          descend(e, e.definition.entities, tr, out, shadow)
         end
       end
+    end
+
+    # Recurse into a container. Once inside a shadow group we stay in shadow mode
+    # but don't descend into its nested groups (e.g. the area-text sub-group).
+    def descend(container, ents, tr, out, shadow)
+      return if shadow # already collecting a shadow group's flat geometry
+      walk(ents, tr * container.transformation, out, shadow_group?(container))
+    end
+
+    # A TIG-shadowProjector result group is tagged with this attribute.
+    def shadow_group?(container)
+      dict = container.attribute_dictionary('ShadowProjector')
+      !dict.nil? && dict['id'] == true
     end
 
     def build_face(face, tr)

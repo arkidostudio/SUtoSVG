@@ -65,6 +65,17 @@ check('omits edge layers when there are no edges', !svg2.include?('id="edges-'))
 svg3 = SvgWriter.build([], [])
 check('empty input yields a valid <svg>', svg3.include?('<svg') && svg3.include?('viewBox'))
 
+# Shadows render in their own layer, at the bottom, under the edges.
+shadow = Face.new([[[0, 0], [20, 0], [20, 20], [0, 20]]], '#808080')
+edge4  = Edge.new([[5, 5], [15, 15]], 1.0, :thin)
+svg4 = SvgWriter.build([], [edge4], shadow_polys: [shadow], shadow_opacity: 0.5, margin: 0.0)
+check('shadows get their own labelled layer',
+      svg4.include?('id="shadows"') && svg4.include?('inkscape:label="shadows"'))
+check('shadow layer carries its opacity', svg4.include?('opacity="0.5"'))
+check('shadow layer is drawn before (under) the edges',
+      svg4.index('id="shadows"') < svg4.index('id="edges-thin"'))
+check('shadow bounds are included in the canvas', svg4.include?('viewBox="0 0 20 20"'))
+
 # Number formatting: trailing zeros stripped, decimals kept.
 check('fmt strips trailing zeros', SvgWriter.fmt(30.0) == '30')
 check('fmt keeps meaningful decimals', SvgWriter.fmt(12.5) == '12.5')

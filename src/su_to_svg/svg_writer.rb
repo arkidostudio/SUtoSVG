@@ -26,11 +26,17 @@ module SUtoSVG
 
     module_function
 
-    # faces : Array<Face>, already sorted back-to-front (drawn in order).
-    # edges : Array<Edge>.
-    # margin: uniform padding (px) added around the content bounds.
-    def build(faces, edges, margin: 0.0)
-      min_x, min_y, max_x, max_y = bounds(faces, edges)
+    # fills         : Array, drawn back-to-front, of EITHER a Face OR a clipped
+    #                 shadow group { clip: [[x,y]...], polys: [Face...] } (a
+    #                 shadow cast onto a receiving face, clipped to it). Mixing
+    #                 the two lets cast shadows occlude correctly by depth.
+    # edges         : Array<Edge>.
+    # shadow_polys  : Array<Face> — ground shadow areas (own layer, at bottom).
+    # shadow_lines  : Array of [[x,y],[x,y]] — shadow outlines (LINES-type).
+    # margin        : uniform padding (px) added around the content bounds.
+    def build(fills, edges, shadow_polys: [], shadow_lines: [],
+              shadow_fill: '#808080', shadow_opacity: 0.5, margin: 0.0)
+      min_x, min_y, max_x, max_y = bounds(fills, edges, shadow_polys, shadow_lines)
       return empty_svg if min_x.nil? # nothing to draw
 
       dx = margin - min_x
@@ -45,9 +51,34 @@ module SUtoSVG
              %(width="#{fmt(width)}" height="#{fmt(height)}" ) +
              %(viewBox="0 0 #{fmt(width)} #{fmt(height)}">)
 
-      unless faces.empty?
+      out.concat(clip_defs(fills, dx, dy))
+
+      # Ground shadows go at the bottom, in their own selectable layer.
+      unless shadow_polys.empty? && shadow_lines.empty?
+        out << %(  <g id="shadows" inkscape:groupmode="layer" inkscape:label="shadows" ) +
+               %(opacity="#{fmt(shadow_opacity)}">)
+        shadow_polys.each { |f| out << '    ' + face_element(f, dx, dy) }
+        shadow_lines.each do |pts|
+          out << '    ' + %(<polyline points="#{points_attr(pts, dx, dy)}" fill="none" ) +
+                 %(stroke="#{shadow_fill}" stroke-width="1"/>)
+        end
+        out << '  </g>'
+      end
+
+      # Faces and cast-shadow groups, depth-ordered together.
+      unless fills.empty?
         out << layer_open('faces', nil)
-        faces.each { |f| out << '    ' + face_element(f, dx, dy) }
+        clip_i = 0
+        fills.each do |item|
+          if item.is_a?(Hash) # clipped cast-shadow group
+            out << %(    <g clip-path="url(#sfclip#{clip_i})">)
+            item[:polys].each { |f| out << '      ' + face_element(f, dx, dy) }
+            out << '    </g>'
+            clip_i += 1
+          else
+            out << '    ' + face_element(item, dx, dy)
+          end
+        end
         out << '  </g>'
       end
 
@@ -94,8 +125,23 @@ module SUtoSVG
 
     # --- geometry helpers --------------------------------------------------
 
+    # <clipPath> definitions for every clipped cast-shadow group in `fills`,
+    # numbered in the same order they are drawn.
+    def clip_defs(fills, dx, dy)
+      groups = fills.select { |x| x.is_a?(Hash) }
+      return [] if groups.empty?
+      lines = ['  <defs>']
+      groups.each_with_index do |g, i|
+        lines << %(    <clipPath id="sfclip#{i}"><polygon points="#{points_attr(g[:clip], dx, dy)}"/></clipPath>)
+      end
+      lines << '  </defs>'
+      lines
+    end
+
     # Returns [min_x, min_y, max_x, max_y], or all-nil if there are no points.
-    def bounds(faces, edges)
+    # Cast-shadow polys are clipped to their receiving face, so only the clip
+    # loop contributes to the canvas bounds (not the unclipped projection).
+    def bounds(fills, edges, shadow_polys = [], shadow_lines = [])
       min_x = min_y = max_x = max_y = nil
       visit = lambda do |x, y|
         min_x = x if min_x.nil? || x < min_x
@@ -103,8 +149,16 @@ module SUtoSVG
         max_x = x if max_x.nil? || x > max_x
         max_y = y if max_y.nil? || y > max_y
       end
-      faces.each { |f| f.loops.each { |loop| loop.each { |(x, y)| visit.call(x, y) } } }
+      fills.each do |item|
+        if item.is_a?(Hash)
+          item[:clip].each { |(x, y)| visit.call(x, y) }
+        else
+          item.loops.each { |loop| loop.each { |(x, y)| visit.call(x, y) } }
+        end
+      end
+      shadow_polys.each { |f| f.loops.each { |loop| loop.each { |(x, y)| visit.call(x, y) } } }
       edges.each { |e| e.points.each { |(x, y)| visit.call(x, y) } }
+      shadow_lines.each { |pts| pts.each { |(x, y)| visit.call(x, y) } }
       [min_x, min_y, max_x, max_y]
     end
 

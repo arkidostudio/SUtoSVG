@@ -56,6 +56,30 @@ Restart SketchUp.
 4. Choose a save location. Open the `.svg` in a browser, Illustrator, Inkscape,
    or Figma.
 
+### Shadows
+
+SUtoSVG has a **built-in cast-shadow projector** (clean-room; no other extension
+needed). Turn on shadows in SketchUp (**Window ▸ Shadows**), set the date/time so
+the sun is where you want it, then **Run** — the selection is projected along the
+sun vector onto a ground plane and drawn in a separate, selectable **`shadows`**
+SVG layer, under the line drawing.
+
+- The shadow follows the model's current sun position and only appears when
+  SketchUp shadows are **on**.
+- When a shadow is present, the object faces are **shaded** like SketchUp's sun
+  (white where lit, gray where turned away from the sun). These opaque faces
+  self-shade *and* occlude the ground shadow behind the objects, so it isn't
+  drawn over them (`MASK_SHADOW`, assumes a white page).
+- Shadows also fall from one object onto **another object's faces**
+  (`RECEIVE_ON_FACES`), clipped to each face and **depth-interleaved** with the
+  shaded faces so a nearer object correctly covers a shadow on a farther face.
+- `SHADOW_GROUND` sets the ground height: `:auto` (base of the selection) or a
+  number. Adjust with `EXPORT_CAST_SHADOW`, `SHADOW_FILL`, `SHADOW_OPACITY`.
+
+It also still picks up shadow geometry made by the **TIG-shadowProjector**
+extension if any is in the selection (`EXPORT_SHADOWS`), but that's optional —
+the built-in caster needs nothing else installed.
+
 ### Line weight
 
 All edges are drawn at a single, uniform stroke width. Set it via the

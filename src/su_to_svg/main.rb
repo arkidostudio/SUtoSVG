@@ -6,6 +6,7 @@ require File.join(File.dirname(__FILE__), 'projector')
 require File.join(File.dirname(__FILE__), 'hlr')
 require File.join(File.dirname(__FILE__), 'dedup')
 require File.join(File.dirname(__FILE__), 'weld')
+require File.join(File.dirname(__FILE__), 'shadow')
 require File.join(File.dirname(__FILE__), 'svg_writer')
 
 module SUtoSVG
@@ -22,6 +23,24 @@ module SUtoSVG
   # Merge coincident/overlapping collinear lines (shared edges of objects that
   # touch) into a single line so they don't export doubled up.
   DEDUP_OVERLAPS    = true
+  # Built-in cast shadow: project the selection along SketchUp's sun vector onto
+  # a ground plane and draw it in the "shadows" layer. Computed at export time
+  # from the model's current sun position; only when SketchUp shadows are on.
+  EXPORT_CAST_SHADOW = true
+  SHADOW_GROUND      = :auto # :auto = base (min Z) of the selection, or a number
+  # Cast shadows from one object onto another object's faces, clipped to each
+  # face and depth-interleaved with the shaded faces so they occlude correctly.
+  RECEIVE_ON_FACES   = true
+  # Also pick up shadow groups made by the TIG-shadowProjector extension, if any
+  # are in the selection (kept for compatibility; the built-in caster needs no
+  # other extension).
+  EXPORT_SHADOWS    = true
+  SHADOW_FILL       = '#808080'
+  SHADOW_OPACITY    = 0.5
+  # Knock the shadow out from behind the objects (so it isn't drawn over them)
+  # by masking with opaque object silhouettes. Assumes a white page background.
+  MASK_SHADOW       = true
+  SHADOW_MASK_COLOR = '#ffffff'
   # When true, faces whose back side points at the camera are painted with the
   # back material / SketchUp's blue back-face color — faithful to the viewport,
   # but reversed faces then show up blue. When false (default), every face uses
@@ -89,7 +108,7 @@ module SUtoSVG
   # menu's file_loaded? guard keeps it from being added twice.
   def reload
     dir = File.dirname(__FILE__)
-    files = %w[collector projector hlr dedup weld svg_writer main].map { |n| File.join(dir, "#{n}.rb") }
+    files = %w[collector projector hlr dedup weld shadow svg_writer main].map { |n| File.join(dir, "#{n}.rb") }
     files.each { |f| load(f) }
     "SUtoSVG reloaded #{files.length} files"
   end
@@ -176,7 +195,8 @@ module SUtoSVG
     end
 
     data = Collector.collect(sel)
-    if data[:faces].empty? && data[:edges].empty?
+    has_shadow = !(data[:shadow_faces].empty? && data[:shadow_edges].empty?)
+    if data[:faces].empty? && data[:edges].empty? && !has_shadow
       UI.messagebox('The selection contains no faces or edges to export.')
       return
     end
@@ -186,26 +206,48 @@ module SUtoSVG
     adapter    = ViewAdapter.new(view)
     bias       = HLR_BIAS_FRAC * world_diagonal(data)
     projected  = project_faces(view, model, adapter, data[:faces])
-    svg_faces  = DRAW_FACES ? faces_to_svg(projected) : []
+
+    # Shadow world-space polygons: TIG groups (if any) + our own cast shadow.
+    shadow_world = []
+    shadow_world += data[:shadow_faces].map(&:loops) if EXPORT_SHADOWS
+    shadow_world += compute_cast_shadow(model, data[:faces]) if EXPORT_CAST_SHADOW
+    shadow_polys, shadow_lines = build_shadows(view, adapter, shadow_world, data[:shadow_edges])
+    has_cast_shadow = shadow_polys.any? || shadow_lines.any?
+
+    # Fills layer: real colours if DRAW_FACES; else, when a shadow is present,
+    # shaded faces (white lit / gray shaded) plus cast shadows onto other faces,
+    # all depth-ordered so everything occludes correctly. No shadow -> no fills.
+    fills =
+      if DRAW_FACES
+        faces_to_svg(projected)
+      elsif MASK_SHADOW && has_cast_shadow
+        build_fills(view, adapter, model, projected, data[:faces])
+      else
+        []
+      end
+
     svg_edges  = DRAW_EDGES ? build_svg_edges(view, adapter, projected, data[:edges], bias) : []
     Weld.close_gaps(svg_edges, threshold: WELD_GAP_PX) if DRAW_EDGES && WELD_GAP_PX > 0.0
 
-    if svg_faces.empty? && svg_edges.empty?
+    if fills.empty? && svg_edges.empty? && shadow_polys.empty? && shadow_lines.empty?
       UI.messagebox('Nothing projectable in the current view (is the selection ' \
                     'behind the camera?).')
       return
     end
 
-    svg = SvgWriter.build(svg_faces, svg_edges, margin: SVG_MARGIN)
+    svg = SvgWriter.build(fills, svg_edges, margin: SVG_MARGIN,
+                          shadow_polys: shadow_polys, shadow_lines: shadow_lines,
+                          shadow_fill: SHADOW_FILL, shadow_opacity: SHADOW_OPACITY)
 
     path = UI.savepanel('Export Selection to SVG', default_dir(model), 'selection.svg')
     return if path.nil? # user cancelled
 
     path += '.svg' unless path.downcase.end_with?('.svg')
     File.write(path, svg)
+    nshadow = shadow_polys.length + shadow_lines.length
+    shadow_note = nshadow.positive? ? ", #{nshadow} shadow shapes" : ''
     Sketchup.status_text =
-      "SUtoSVG: exported #{svg_faces.length} faces, #{svg_edges.length} edge " \
-      "segments to #{path}"
+      "SUtoSVG: exported #{svg_edges.length} edge segments#{shadow_note} to #{path}"
   rescue => e
     UI.messagebox("SUtoSVG export failed:\n#{e.message}")
     raise
@@ -242,6 +284,43 @@ module SUtoSVG
       .map { |f| SvgWriter::Face.new(f[:loops2d], f[:fill]) }
   end
 
+  # Build the depth-ordered fills: shaded object faces (white lit / gray
+  # self-shaded) mixed with cast-shadow groups (gray, clipped to the face they
+  # land on). Everything is back-to-front sorted so opaque faces occlude the
+  # ground shadow and each other, and a cast shadow is covered by nearer objects.
+  def build_fills(view, adapter, model, projected, world_faces)
+    sun = model.shadow_info['SunDirection']
+    s = [sun.x, sun.y, sun.z]
+    gray = blended_shadow_gray
+
+    items = [] # [depth, tiebreak, drawable]
+    projected.each do |f|
+      n = f[:plane][1]
+      lit = (n[0] * s[0] + n[1] * s[1] + n[2] * s[2]) > 0.0
+      items << [f[:depth], 0, SvgWriter::Face.new(f[:loops2d], lit ? SHADOW_MASK_COLOR : gray)]
+    end
+
+    if RECEIVE_ON_FACES
+      build_face_shadows(view, adapter, compute_face_shadows(model, world_faces)).each do |g|
+        # tiebreak 1 => at equal depth the shadow draws just after its receiver.
+        items << [g[:depth], 1, { clip: g[:clip], polys: g[:polys] }]
+      end
+    end
+
+    items.sort_by { |depth, tie, _| [-depth, tie] }.map { |_, _, item| item }
+  end
+
+  # The shadow colour composited over white at SHADOW_OPACITY, so opaque shaded
+  # faces read the same tone as the (semi-transparent) ground shadow layer.
+  def blended_shadow_gray
+    r = SHADOW_FILL[1, 2].to_i(16)
+    g = SHADOW_FILL[3, 2].to_i(16)
+    b = SHADOW_FILL[5, 2].to_i(16)
+    o = SHADOW_OPACITY
+    format('#%02x%02x%02x', (r * o + 255 * (1 - o)).round,
+           (g * o + 255 * (1 - o)).round, (b * o + 255 * (1 - o)).round)
+  end
+
   # --- edges (with optional hidden-line removal) ---------------------------
 
   def build_svg_edges(view, adapter, projected, world_edges, bias)
@@ -265,6 +344,128 @@ module SUtoSVG
 
     points_list = Dedup.merge_segments(points_list) if DEDUP_OVERLAPS
     points_list.map { |points| SvgWriter::Edge.new(points, width, nil) }
+  end
+
+  # --- shadows (from TIG-shadowProjector groups) ---------------------------
+
+  # Project shadow world-polygons (each an Array of loops of Geom::Point3d) into
+  # 2D filled polygons. A LINES-type TIG shadow (no faces) falls back to stroked
+  # outlines from shadow_edges. Returns [polys, lines].
+  def build_shadows(view, adapter, shadow_world, shadow_edges)
+    polys = []
+    shadow_world.each do |loops|
+      next if loops.flatten.any? { |p| Projector.behind_camera?(view, p) }
+      loops2d = loops.map { |loop| loop.map { |p| adapter.project(p.to_a) } }
+      polys << SvgWriter::Face.new(loops2d, SHADOW_FILL)
+    end
+
+    lines = []
+    if polys.empty? # LINES-type shadow: draw the outline edges
+      shadow_edges.each do |we|
+        next if Projector.behind_camera?(view, we.a) || Projector.behind_camera?(view, we.b)
+        lines << [adapter.project(we.a.to_a), adapter.project(we.b.to_a)]
+      end
+      lines = Dedup.merge_segments(lines) if DEDUP_OVERLAPS && !lines.empty?
+    end
+
+    [polys, lines]
+  end
+
+  # Built-in cast shadow: project every selected face along the sun's light
+  # direction onto a horizontal ground plane. The union of the projected faces
+  # (composited at the layer's opacity) is the shadow silhouette. Returns an
+  # Array of world polygons (each an Array of loops of Geom::Point3d).
+  def compute_cast_shadow(model, world_faces)
+    return [] if world_faces.empty?
+    si = model.shadow_info
+    return [] unless si['DisplayShadows'] # follow SketchUp's shadow toggle
+    sun = si['SunDirection']
+    dir = [-sun.x, -sun.y, -sun.z] # light travels opposite the sun direction
+    return [] unless dir[2] < -1e-6 # sun must be above the horizon to cast down
+
+    ground = ground_z(world_faces)
+    out = []
+    world_faces.each do |wf|
+      loops = wf.loops.map do |loop|
+        projected = Shadow.project_loop(loop.map { |p| [p.x, p.y, p.z] }, dir, ground)
+        projected && projected.map { |q| Geom::Point3d.new(q[0], q[1], q[2]) }
+      end
+      out << loops unless loops.include?(nil)
+    end
+    out
+  end
+
+  # For each sun-facing face in the selection, project the other faces (that are
+  # on the sun side of it) onto its plane along the light. Returns an Array of
+  # { clip: [Geom::Point3d receiving-face loop], polys: [[Geom::Point3d loop]] };
+  # the projected polys are clipped to the receiving face when drawn.
+  def compute_face_shadows(model, world_faces)
+    return [] if world_faces.empty?
+    si = model.shadow_info
+    return [] unless si['DisplayShadows']
+    sun = si['SunDirection']
+    dir = [-sun.x, -sun.y, -sun.z]
+    sundir = [sun.x, sun.y, sun.z]
+
+    groups = []
+    world_faces.each do |recv|
+      n = [recv.normal.x, recv.normal.y, recv.normal.z]
+      next unless dot3(n, sundir) > 1e-6 # receiver must face the sun
+      plane_pt = [recv.center.x, recv.center.y, recv.center.z]
+
+      polys = []
+      world_faces.each do |caster|
+        next if caster.equal?(recv)
+        cn = [caster.normal.x, caster.normal.y, caster.normal.z]
+        cc = [caster.center.x, caster.center.y, caster.center.z]
+        dist = dot3(n, [cc[0] - plane_pt[0], cc[1] - plane_pt[1], cc[2] - plane_pt[2]])
+        next if dist.abs < 1e-4 && dot3(cn, n).abs > 0.999 # skip coplanar casters
+        loop3 = caster.loops.first.map { |p| [p.x, p.y, p.z] }
+        # Keep only the part of the caster on the sun side of the receiver plane,
+        # so casters that straddle it (typical for vertical receivers) still cast.
+        clipped = Shadow.clip_to_halfspace(loop3, plane_pt, n)
+        next if clipped.length < 3
+        proj = Shadow.project_loop_to_plane(clipped, dir, plane_pt, n)
+        next if proj.nil?
+        polys << proj.map { |q| Geom::Point3d.new(q[0], q[1], q[2]) }
+      end
+      next if polys.empty?
+      clip = recv.loops.first.map { |p| Geom::Point3d.new(p.x, p.y, p.z) }
+      groups << { clip: clip, polys: polys, center: recv.center }
+    end
+    groups
+  end
+
+  # Project face-shadow groups to 2D. Returns
+  # [{ depth:, clip: [[x,y]], polys: [Face] }] — depth is the receiving face's.
+  def build_face_shadows(view, adapter, groups)
+    gray = blended_shadow_gray
+    out = []
+    groups.each do |g|
+      next if g[:clip].any? { |p| Projector.behind_camera?(view, p) }
+      clip2d = g[:clip].map { |p| adapter.project(p.to_a) }
+      polys2d = []
+      g[:polys].each do |loop|
+        next if loop.any? { |p| Projector.behind_camera?(view, p) }
+        polys2d << SvgWriter::Face.new([loop.map { |p| adapter.project(p.to_a) }], gray)
+      end
+      out << { depth: Projector.depth(view, g[:center]), clip: clip2d, polys: polys2d } unless polys2d.empty?
+    end
+    out
+  end
+
+  def dot3(a, b)
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+  end
+
+  # Height of the receiving ground plane.
+  def ground_z(world_faces)
+    return SHADOW_GROUND.to_f unless SHADOW_GROUND == :auto
+    minz = nil
+    world_faces.each do |wf|
+      wf.loops.each { |loop| loop.each { |p| minz = p.z if minz.nil? || p.z < minz } }
+    end
+    minz || 0.0
   end
 
   # --- automatic solid-intersection creases --------------------------------
@@ -319,6 +520,12 @@ module SUtoSVG
     return unless result # cancelled
     Sketchup.write_default(PREF, 'line_width', result[0].to_f)
     Sketchup.status_text = "SUtoSVG: line width saved (#{result[0].to_f} px)"
+  end
+
+  # Reset saved settings back to their defaults.
+  def reset
+    Sketchup.write_default(PREF, 'line_width', DEFAULT_WIDTH)
+    Sketchup.status_text = "SUtoSVG: settings reset (line width #{DEFAULT_WIDTH} px)"
   end
 
   # --- color ---------------------------------------------------------------
@@ -409,17 +616,24 @@ unless file_loaded?(__FILE__)
   settings_cmd.tooltip = 'Set Line Weight'
   settings_cmd.status_bar_text = 'Set the stroke width for the export'
 
+  reset_cmd = UI::Command.new('Reset') { SUtoSVG.reset }
+  reset_cmd.small_icon = reset_cmd.large_icon = File.join(icons, 'reset.svg')
+  reset_cmd.tooltip = 'Reset settings to defaults'
+  reset_cmd.status_bar_text = 'Reset SUtoSVG settings to their defaults'
+
   toolbar = UI::Toolbar.new('SUtoSVG')
   toolbar.add_item(export_cmd)
   toolbar.add_item(settings_cmd)
+  toolbar.add_item(reset_cmd)
   toolbar.restore
 
-  # Arkido > SUtoSVG > Run / Set Line Weight (a shared "Arkido" submenu under
-  # Extensions; $arkido_menu lets sibling Arkido tools reuse the same submenu).
+  # Arkido > SUtoSVG > Run / Set Line Weight / Reset (a shared "Arkido" submenu
+  # under Extensions; $arkido_menu lets sibling Arkido tools reuse the submenu).
   $arkido_menu ||= UI.menu('Extensions').add_submenu('Arkido')
   sutosvg_menu = $arkido_menu.add_submenu('SUtoSVG')
   sutosvg_menu.add_item(export_cmd)
   sutosvg_menu.add_item(settings_cmd)
+  sutosvg_menu.add_item(reset_cmd)
 
   file_loaded(__FILE__)
 end
