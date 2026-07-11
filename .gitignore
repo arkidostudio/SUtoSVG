@@ -1,0 +1,10 @@
+# macOS
+.DS_Store
+
+# Generated demo / sample output (produced by test/make_*.rb)
+/sample_cube.svg
+/cube_hlr.svg
+/cube_wire.svg
+
+# Ad-hoc SVG exports used while developing
+/test/*.svg
