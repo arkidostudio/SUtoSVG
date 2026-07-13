@@ -43,7 +43,7 @@ module SUtoSVG
     # ground_mask  : Array of 2D outer loops — every object silhouette. Used to
     #                clip the ground shadow so it doesn't bleed through objects.
     def build(fills, edges, shadow_polys: [], shadow_lines: [], shadow_fill: '#808080',
-              shadow_opacity: 0.5, margin: 0.0)
+              shadow_opacity: 0.5, margin: 0.0, ground_mask: [])
       min_x, min_y, max_x, max_y = bounds(fills, edges, shadow_polys, shadow_lines)
       return empty_svg if min_x.nil?
 
@@ -59,14 +59,25 @@ module SUtoSVG
              %(width="#{fmt(width)}" height="#{fmt(height)}" ) +
              %(viewBox="0 0 #{fmt(width)} #{fmt(height)}">)
 
-      # Ground shadow (own layer, pieces merged into one shape). Depth-ordered
-      # opaque face fills in the faces layer above hide any bleed-through — no
-      # clipping needed. Shadow tone is baked into the fill via
-      # `blended_shadow_gray` so no layer-level opacity (would double-blend).
+      # SVG <mask>s to hide shadow bleed-through: ground shadow behind the
+      # building, face-shadows behind nearer geometry. Grayscale (white=show,
+      # black=hide); black silhouettes union naturally in raster space so no
+      # polygon boolean is needed. Masks live in <defs> only — nothing visible.
       up = merged_shape(shadow_polys, dx, dy)
+      mask_specs = []
+      mask_specs << { id: 'mask-ground', loops: ground_mask } if up && ground_mask.any?
+      fills.each_with_index do |item, i|
+        next unless item.is_a?(Hash) && item[:mask_loops] && !item[:mask_loops].empty?
+        mask_specs << { id: "mask-fs-#{i}", loops: item[:mask_loops] }
+      end
+      out.concat(mask_defs(mask_specs, dx, dy, width, height))
+
+      # Ground shadow. Shadow tone is baked into the fill via
+      # `blended_shadow_gray` — no layer-level opacity (would double-blend).
       unless up.nil? && shadow_lines.empty?
         out << %(  <g id="shadow-ground" inkscape:groupmode="layer" ) +
                %(inkscape:label="shadow-ground">)
+        up = apply_mask(up, 'mask-ground') if up && ground_mask.any?
         out << '    ' + up if up
         shadow_lines.each do |pts|
           out << '    ' + %(<polyline points="#{points_attr(pts, dx, dy)}" fill="none" ) +
@@ -75,20 +86,25 @@ module SUtoSVG
         out << '  </g>'
       end
 
-      # Faces (white lit / gray unlit) + cast-onto-face shadows, depth-ordered
-      # together so the opaque faces naturally occlude both the ground shadow
-      # behind them and face-shadows on farther receivers.
+      # Face fills + face-shadows, depth-ordered. Face-shadows are each masked
+      # by strictly-nearer face silhouettes so they don't leak in front of the
+      # receiver. Layer is "faces" if any face fill was emitted, else
+      # "shadow-faces" (shadows-only output).
       rendered = []
-      fills.each do |item|
+      any_face = false
+      fills.each_with_index do |item, i|
         if item.is_a?(Hash)
           cp = merged_shape(item[:polys], dx, dy)
-          rendered << cp if cp
+          next unless cp
+          cp = apply_mask(cp, "mask-fs-#{i}") if item[:mask_loops] && !item[:mask_loops].empty?
+          rendered << cp
         elsif visible?(item)
           rendered << face_element(item, dx, dy)
+          any_face = true
         end
       end
       unless rendered.empty?
-        out << layer_open('faces', nil)
+        out << layer_open(any_face ? 'faces' : 'shadow-faces', nil)
         rendered.each { |el| out << '    ' + el }
         out << '  </g>'
       end
@@ -176,7 +192,29 @@ module SUtoSVG
       s * 0.5
     end
 
+    def apply_mask(el, mask_id)
+      el.sub(/<(polygon|path) /, %(<\\1 mask="url(##{mask_id})" ))
+    end
+
     # --- geometry helpers --------------------------------------------------
+
+    # Emit one <defs> block of grayscale <mask>s. Each is a white bbox rect with
+    # black silhouette paths on top — raster union handles overlaps for free.
+    def mask_defs(specs, dx, dy, width, height)
+      valid = specs.select { |s| s[:loops] && !s[:loops].empty? }
+      return [] if valid.empty?
+      lines = ['  <defs>']
+      valid.each do |spec|
+        lines << %(    <mask id="#{spec[:id]}" maskUnits="userSpaceOnUse">)
+        lines << %(      <rect width="#{fmt(width)}" height="#{fmt(height)}" fill="white"/>)
+        spec[:loops].each do |loop|
+          lines << %(      <path d="#{loop_to_path(loop, dx, dy)}" fill="black"/>)
+        end
+        lines << '    </mask>'
+      end
+      lines << '  </defs>'
+      lines
+    end
 
     # Returns [min_x, min_y, max_x, max_y], or all-nil if there are no points.
     def bounds(fills, edges, shadow_polys = [], shadow_lines = [])

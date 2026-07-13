@@ -235,9 +235,14 @@ module SUtoSVG
       return
     end
 
+    # 2D silhouettes of every face — mask the ground shadow so it doesn't
+    # bleed through the building (which has no opaque fill any more).
+    silhouettes = projected.map { |f| f[:loops2d].first }
+
     svg = SvgWriter.build(fills, svg_edges, margin: SVG_MARGIN,
                           shadow_polys: shadow_polys, shadow_lines: shadow_lines,
-                          shadow_fill: blended_shadow_gray, shadow_opacity: SHADOW_OPACITY)
+                          shadow_fill: blended_shadow_gray, shadow_opacity: SHADOW_OPACITY,
+                          ground_mask: silhouettes)
 
     path = UI.savepanel('Export Selection to SVG', default_dir(model), 'selection.svg')
     return if path.nil? # user cancelled
@@ -292,25 +297,14 @@ module SUtoSVG
   def build_fills(view, adapter, model, projected, world_faces)
     items = [] # [depth, tiebreak, drawable]
 
-    # Every face fills: WHITE if lit, GRAY if unlit. The white lit fills are
-    # OPAQUE occluders that let painter's algorithm hide the ground shadow
-    # behind the building and hide face-shadows behind nearer geometry —
-    # so no <mask>/<clipPath> is needed. Reads as "canvas" on a white viewer
-    # background; unlit gray reads as self-shadow.
-    sun  = model.shadow_info['SunDirection']
-    s    = [sun.x, sun.y, sun.z]
-    gray = blended_shadow_gray
-    projected.each do |f|
-      n = f[:plane][1]
-      lit = (n[0] * s[0] + n[1] * s[1] + n[2] * s[2]) > 0.0
-      items << [f[:depth], 0, SvgWriter::Face.new(f[:loops2d], lit ? SHADOW_MASK_COLOR : gray)]
-    end
-
+    # No face fills — the canvas shows through where the building would be.
+    # Each face-shadow carries its own mask of strictly-nearer face silhouettes
+    # so it doesn't bleed through geometry standing in front of the receiver.
     if RECEIVE_ON_FACES
       build_face_shadows(view, adapter, compute_face_shadows(model, world_faces)).each do |g|
-        # tie=1 so the shadow draws just after (over) its same-depth receiver;
-        # nearer faces still sort later and cover the shadow where they occlude.
-        items << [g[:depth], 1, { polys: g[:polys] }]
+        mask = projected.select { |f| f[:depth] < g[:depth] - 1e-4 }
+                        .map { |f| f[:loops2d].first }
+        items << [g[:depth], 1, { polys: g[:polys], mask_loops: mask }]
       end
     end
 

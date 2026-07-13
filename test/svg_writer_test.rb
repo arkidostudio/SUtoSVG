@@ -78,17 +78,32 @@ check('merged path uses nonzero union', svg4.include?('fill-rule="nonzero"'))
 check('shadow layer is drawn before (under) the edges',
       svg4.index('id="shadow-ground"') < svg4.index('id="edges-thin"'))
 
-# Fills: a face and a cast-shadow group are drawn together (depth-ordered);
-# the cast group arrives PRE-CLIPPED and draws as a plain shape — no clipPath.
+# Fills: a face and a cast-shadow group are drawn together (depth-ordered).
+# A cast group with no mask_loops draws as a plain shape.
 face_white = Face.new([[[0, 0], [10, 0], [10, 10], [0, 10]]], '#ffffff')
 cast = { polys: [Face.new([[[22, 2], [34, 2], [34, 18], [22, 18]]], '#c0c0c0'),
                  Face.new([[[28, 2], [38, 2], [38, 18], [28, 18]]], '#c0c0c0')] } # two overlapping pieces
 svg5 = SvgWriter.build([face_white, cast], [], margin: 0.0)
 check('faces + cast shadows share the faces layer', svg5.include?('id="faces"'))
-check('no clipPath/mask elements anywhere in the output',
-      !svg5.include?('clipPath') && !svg5.include?('clip-path') &&
-      !svg5.include?('<mask') && !svg5.include?('mask='))
+check('unmasked cast shadow carries no mask attribute', !svg5.include?('mask='))
 check('overlapping cast pieces merge via nonzero', svg5.include?('fill-rule="nonzero"'))
+
+# Shadow-only input (no face fills) uses the shadow-faces layer id.
+svg_so = SvgWriter.build([cast], [], margin: 0.0)
+check('shadow-only fills use the shadow-faces layer id', svg_so.include?('id="shadow-faces"'))
+
+# Face-shadows with mask_loops emit an SVG <mask> and reference it.
+masked = { polys: [Face.new([[[10, 10], [40, 10], [40, 40], [10, 40]]], '#c0c0c0')],
+           mask_loops: [[[15, 5], [25, 5], [25, 45], [15, 45]]] }
+svg_m = SvgWriter.build([masked], [], margin: 0.0)
+check('mask defs emitted for face-shadow', svg_m.include?('<mask id="mask-fs-0"'))
+check('face-shadow references its mask', svg_m.include?('mask="url(#mask-fs-0)"'))
+
+# Ground shadow with ground_mask emits mask-ground and references it.
+gpoly = Face.new([[[0, 0], [100, 0], [100, 20], [0, 20]]], '#c0c0c0')
+svg_g = SvgWriter.build([], [], shadow_polys: [gpoly],
+                        ground_mask: [[[40, 0], [60, 0], [60, 20], [40, 20]]], margin: 0.0)
+check('ground shadow references mask-ground', svg_g.include?('mask="url(#mask-ground)"'))
 
 # A single, pre-unioned face (with a hole) is drawn directly, honouring the hole.
 holed = Face.new([[[0, 0], [40, 0], [40, 40], [0, 40]], [[10, 10], [30, 10], [30, 30], [10, 30]]], '#c0c0c0')
