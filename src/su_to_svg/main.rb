@@ -297,9 +297,25 @@ module SUtoSVG
   def build_fills(view, adapter, model, projected, world_faces)
     items = [] # [depth, tiebreak, drawable]
 
-    # No face fills — the canvas shows through where the building would be.
-    # Each face-shadow carries its own mask of strictly-nearer face silhouettes
-    # so it doesn't bleed through geometry standing in front of the receiver.
+    # No face fills — the canvas shows through where lit faces would be. Each
+    # shadow (self-shadow on unlit faces + cast shadows on lit ones) carries a
+    # mask of strictly-nearer silhouettes so it doesn't leak in front of the
+    # receiver.
+    sun  = model.shadow_info['SunDirection']
+    s    = [sun.x, sun.y, sun.z]
+    gray = blended_shadow_gray
+
+    # Self-shadow: unlit faces are uniformly in shadow — emit each whole face
+    # silhouette as a shadow shape.
+    projected.each do |f|
+      n = f[:plane][1]
+      next if (n[0] * s[0] + n[1] * s[1] + n[2] * s[2]) > 0.0 # lit, skip
+      mask = projected.select { |o| o[:depth] < f[:depth] - 1e-4 }
+                      .map { |o| o[:loops2d].first }
+      items << [f[:depth], 0, { polys: [SvgWriter::Face.new(f[:loops2d], gray)],
+                                mask_loops: mask }]
+    end
+
     if RECEIVE_ON_FACES
       build_face_shadows(view, adapter, compute_face_shadows(model, world_faces)).each do |g|
         mask = projected.select { |f| f[:depth] < g[:depth] - 1e-4 }
