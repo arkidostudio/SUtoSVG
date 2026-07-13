@@ -46,20 +46,18 @@ test/*_test.rb             pure-Ruby unit tests, run with `ruby test/<name>_test
 2. **Project** each face and camera-depth via `ViewAdapter` + `Projector`.
 3. **Edges → HLR → weld → dedup → single-width polylines** grouped in
    `edges-<weight>` layers.
-4. **Unlit face fills**: faces whose normal points away from the sun
-   (`dot(n, sun) <= 0`) are filled GRAY so self-shadowed sides read the same as
-   cast shadows. Lit faces stay unfilled — the output has no white rectangles.
+4. **Shaded face fills**: each face fills WHITE if lit (`dot(n, sun) > 0`) or
+   GRAY if unlit. The white lit fills act as opaque "canvas" occluders — the
+   viewer background reads white, but the fills hide the ground shadow and any
+   farther face-shadow behind them via painter's algorithm. No SVG `<mask>` or
+   `<clipPath>` — depth-sorted opaque fills do the occlusion.
 5. **Shadows** (when `model.shadow_info['DisplayShadows']`):
    - Ground shadow: project every face along the sun onto the base plane, merge
      into one `<path>` via nonzero union.
    - Face shadows: project casters onto each sun-facing receiver, clipped to
      that face's plane and pre-clipped to sun-side half-space.
-   - Per-shadow **partial-occlusion mask** (SVG `<mask>` — grayscale, black
-     silhouettes on white): ground shadow masked by every object silhouette;
-     each face-shadow masked by strictly-nearer face silhouettes. Uses `<mask>`
-     rather than `<clipPath evenodd>` so overlapping silhouettes union in raster
-     space and don't toggle back to "inside".
-6. **SVG writer** emits masks, faces + face-shadows, ground shadow, and edges.
+6. **SVG writer** emits ground shadow, then faces + face-shadows depth-sorted,
+   then edges — pure painter's algorithm.
 
 ## Output structure
 
@@ -72,9 +70,10 @@ them as layers):
   receiver, each clipped by its nearer occluders).
 - `edges-thin`, `edges-thick` — the line drawing (per-weight layers).
 
-**Only UNLIT faces are drawn as fills** (gray). Lit faces stay unfilled so the
-output is just shadow shapes + lines on a transparent background. Set
-`DRAW_FACES = true` to use real face colours instead.
+**Faces ARE drawn as fills** — white lit / gray unlit. The white lit fills
+occlude anything behind them (ground shadow, farther face shadows) so the
+output needs no `<clipPath>` or `<mask>` — pure painter's algorithm.
+Set `DRAW_FACES = true` to use real face colours instead.
 
 ## Options (constants at the top of `main.rb`)
 

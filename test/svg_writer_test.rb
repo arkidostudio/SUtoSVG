@@ -85,21 +85,15 @@ cast = { polys: [Face.new([[[22, 2], [34, 2], [34, 18], [22, 18]]], '#c0c0c0'),
                  Face.new([[[28, 2], [38, 2], [38, 18], [28, 18]]], '#c0c0c0')] } # two overlapping pieces
 svg5 = SvgWriter.build([face_white, cast], [], margin: 0.0)
 check('faces + cast shadows share the faces layer', svg5.include?('id="faces"'))
-check('no clipPath masks anywhere in the output',
-      !svg5.include?('clipPath') && !svg5.include?('clip-path'))
+check('no clipPath/mask elements anywhere in the output',
+      !svg5.include?('clipPath') && !svg5.include?('clip-path') &&
+      !svg5.include?('<mask') && !svg5.include?('mask='))
 check('overlapping cast pieces merge via nonzero', svg5.include?('fill-rule="nonzero"'))
 
 # A single, pre-unioned face (with a hole) is drawn directly, honouring the hole.
 holed = Face.new([[[0, 0], [40, 0], [40, 40], [0, 40]], [[10, 10], [30, 10], [30, 30], [10, 30]]], '#c0c0c0')
 svg6 = SvgWriter.build([], [], shadow_polys: [holed], margin: 0.0)
 check('a pre-unioned shadow with a hole uses evenodd', svg6.include?('fill-rule="evenodd"'))
-
-# When only cast shadows are drawn (no object face fills), the layer is named
-# "shadow-faces" — the writer distinguishes shadow-only content from mixed.
-cast_only = { polys: [Face.new([[[0, 0], [30, 0], [30, 30], [0, 30]]], '#c0c0c0')] }
-svg_so = SvgWriter.build([cast_only], [], margin: 0.0)
-check('shadow-only fills use the shadow-faces layer id', svg_so.include?('id="shadow-faces"'))
-check('shadow-only fills omit the faces layer id', !svg_so.include?('id="faces"'))
 
 # Degenerate (edge-on) geometry is culled: zero-area faces, zero-area shadow
 # pieces, duplicate loops — and empty layers are omitted entirely.

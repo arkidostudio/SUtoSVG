@@ -235,15 +235,9 @@ module SUtoSVG
       return
     end
 
-    # 2D silhouettes of every visible face — used to build masks that hide
-    # shadow bleed-through behind objects (ground shadow behind buildings,
-    # face-shadows on faces occluded by nearer objects).
-    silhouettes = projected.map { |f| f[:loops2d].first }
-
     svg = SvgWriter.build(fills, svg_edges, margin: SVG_MARGIN,
                           shadow_polys: shadow_polys, shadow_lines: shadow_lines,
-                          shadow_fill: blended_shadow_gray, shadow_opacity: SHADOW_OPACITY,
-                          ground_mask: silhouettes)
+                          shadow_fill: blended_shadow_gray, shadow_opacity: SHADOW_OPACITY)
 
     path = UI.savepanel('Export Selection to SVG', default_dir(model), 'selection.svg')
     return if path.nil? # user cancelled
@@ -273,7 +267,6 @@ module SUtoSVG
 
       loops2d = wf.loops.map { |loop| loop.map { |p| adapter.project(p.to_a) } }
       out << {
-        face:    wf,
         loops2d: loops2d,
         bbox2d:  bbox2d(loops2d),
         plane:   [wf.center.to_a, wf.normal.to_a],
@@ -299,27 +292,25 @@ module SUtoSVG
   def build_fills(view, adapter, model, projected, world_faces)
     items = [] # [depth, tiebreak, drawable]
 
-    # Unlit faces = self-shadow — fill gray so they read the same tone as cast
-    # shadows. Lit faces stay unfilled (no white rectangles in the output).
+    # Every face fills: WHITE if lit, GRAY if unlit. The white lit fills are
+    # OPAQUE occluders that let painter's algorithm hide the ground shadow
+    # behind the building and hide face-shadows behind nearer geometry —
+    # so no <mask>/<clipPath> is needed. Reads as "canvas" on a white viewer
+    # background; unlit gray reads as self-shadow.
     sun  = model.shadow_info['SunDirection']
     s    = [sun.x, sun.y, sun.z]
     gray = blended_shadow_gray
     projected.each do |f|
       n = f[:plane][1]
-      next if (n[0] * s[0] + n[1] * s[1] + n[2] * s[2]) > 0.0 # lit — skip
-      items << [f[:depth], 0, SvgWriter::Face.new(f[:loops2d], gray)]
+      lit = (n[0] * s[0] + n[1] * s[1] + n[2] * s[2]) > 0.0
+      items << [f[:depth], 0, SvgWriter::Face.new(f[:loops2d], lit ? SHADOW_MASK_COLOR : gray)]
     end
 
     if RECEIVE_ON_FACES
       build_face_shadows(view, adapter, compute_face_shadows(model, world_faces)).each do |g|
-        # Mask by every strictly-nearer face's silhouette (nearer at centroid
-        # depth), excluding the receiver itself. Faces farther than the
-        # receiver sit behind it in 3D, so their 2D silhouettes must NOT mask
-        # (that erases the shadow — the back of the building projects on top
-        # of the visible front in image space).
-        mask = projected.select { |f| f[:depth] < g[:depth] - 1e-4 && !f[:face].equal?(g[:recv]) }
-                        .map { |f| f[:loops2d].first }
-        items << [g[:depth], 1, { polys: g[:polys], mask_loops: mask }]
+        # tie=1 so the shadow draws just after (over) its same-depth receiver;
+        # nearer faces still sort later and cover the shadow where they occlude.
+        items << [g[:depth], 1, { polys: g[:polys] }]
       end
     end
 
@@ -448,7 +439,7 @@ module SUtoSVG
       end
       next if polys.empty?
       clip = recv.loops.first.map { |p| Geom::Point3d.new(p.x, p.y, p.z) }
-      groups << { clip: clip, polys: polys, center: recv.center, recv: recv }
+      groups << { clip: clip, polys: polys, center: recv.center }
     end
     groups
   end
@@ -469,7 +460,7 @@ module SUtoSVG
         clipped = Shadow.clip_polygon(loop.map { |p| adapter.project(p.to_a) }, clip2d)
         polys2d << SvgWriter::Face.new([clipped], gray) if clipped.length >= 3
       end
-      out << { depth: Projector.depth(view, g[:center]), polys: polys2d, recv: g[:recv] } unless polys2d.empty?
+      out << { depth: Projector.depth(view, g[:center]), polys: polys2d } unless polys2d.empty?
     end
     out
   end
