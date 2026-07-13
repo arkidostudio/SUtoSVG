@@ -66,13 +66,19 @@ SVG layer, under the line drawing.
 
 - The shadow follows the model's current sun position and only appears when
   SketchUp shadows are **on**.
-- When a shadow is present, the object faces are **shaded** like SketchUp's sun
-  (white where lit, gray where turned away from the sun). These opaque faces
-  self-shade *and* occlude the ground shadow behind the objects, so it isn't
-  drawn over them (`MASK_SHADOW`, assumes a white page).
-- Shadows also fall from one object onto **another object's faces**
-  (`RECEIVE_ON_FACES`), clipped to each face and **depth-interleaved** with the
-  shaded faces so a nearer object correctly covers a shadow on a farther face.
+- **Output is lines + shadows only.** Object faces are not drawn as fills;
+  they're used internally as HLR occluders and shadow inputs, but never appear
+  as filled polygons in the SVG.
+- Shadows fall from one object onto **another object's faces**
+  (`RECEIVE_ON_FACES`), pre-clipped to each face and depth-ordered so a shadow
+  on a nearer face draws over one on a farther.
+- The `shadow-ground` group holds the ground shadow; the `shadow-faces` group
+  holds the shadows landing on other faces.
+- Each shadow's projected pieces are merged into **one clean shape**. With
+  `TRUE_UNION` (default) SketchUp's geometry engine computes the real union
+  outline (a single editable boundary, holes preserved), non-destructively; if it
+  fails, the writer falls back to a nonzero-fill compound path. Either way the
+  accurate depth-ordered shading is untouched.
 - `SHADOW_GROUND` sets the ground height: `:auto` (base of the selection) or a
   number. Adjust with `EXPORT_CAST_SHADOW`, `SHADOW_FILL`, `SHADOW_OPACITY`.
 

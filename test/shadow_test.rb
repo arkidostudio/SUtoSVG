@@ -81,6 +81,27 @@ check('polygon fully behind the plane is removed', far.empty?)
 front = Shadow.clip_to_halfspace(sq, [-5, 0, 0], [1, 0, 0])
 check('polygon fully in front is kept', front.length == 4)
 
+puts 'Shadow#clip_polygon (2D)'
+
+box = [[0, 0], [10, 0], [10, 10], [0, 10]]
+
+# Subject overhanging the clip box -> trimmed to the overlap.
+over = [[5, 5], [20, 5], [20, 8], [5, 8]]
+r = Shadow.clip_polygon(over, box)
+xs = r.map { |p| p[0] }
+check('overhanging polygon is trimmed to the clip box',
+      r.length >= 3 && xs.max <= 10 + 1e-6 && xs.min >= 5 - 1e-6)
+
+# Fully inside -> unchanged; fully outside -> empty.
+check('inside polygon is unchanged',
+      Shadow.clip_polygon([[2, 2], [4, 2], [4, 4], [2, 4]], box).length == 4)
+check('outside polygon clips to nothing',
+      Shadow.clip_polygon([[20, 20], [30, 20], [30, 30], [20, 30]], box).empty?)
+
+# Clip polygon given in opposite (clockwise) winding still works.
+r = Shadow.clip_polygon(over, box.reverse)
+check('clockwise clip winding is normalized', r.length >= 3 && r.map { |p| p[0] }.max <= 10 + 1e-6)
+
 puts
 if $failures.zero?
   puts 'ALL TESTS PASSED'

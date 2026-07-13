@@ -75,5 +75,57 @@ module SUtoSVG
       plane_n[0] * (p[0] - plane_pt[0]) + plane_n[1] * (p[1] - plane_pt[1]) +
         plane_n[2] * (p[2] - plane_pt[2])
     end
+
+    # --- 2D polygon clipping (Sutherland-Hodgman) ---------------------------
+
+    # Clip 2D polygon `subject` to CONVEX 2D polygon `clip` (both Arrays of
+    # [x, y]). Returns the clipped polygon ([] if no overlap). Used to bake a
+    # cast shadow down to its receiving face at export time, so the SVG gets a
+    # plain pre-trimmed shape instead of a clipPath mask.
+    def clip_polygon(subject, clip)
+      return [] if subject.length < 3 || clip.length < 3
+      clip = clip.reverse if signed_area2d(clip) < 0 # normalize orientation
+      out = subject
+      m = clip.length
+      m.times do |i|
+        out = clip_against_edge2d(out, clip[i], clip[(i + 1) % m])
+        return [] if out.length < 3
+      end
+      out
+    end
+
+    # Keep the part of `poly` on the interior side of directed edge a->b
+    # (interior = left side for a positively-oriented clip polygon).
+    def clip_against_edge2d(poly, a, b)
+      out = []
+      n = poly.length
+      n.times do |i|
+        p = poly[i]
+        q = poly[(i + 1) % n]
+        dp = cross2d(a, b, p)
+        dq = cross2d(a, b, q)
+        out << p if dp >= 0
+        if (dp >= 0) != (dq >= 0)
+          t = dp.to_f / (dp - dq)
+          out << [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]
+        end
+      end
+      out
+    end
+
+    def cross2d(a, b, p)
+      (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+    end
+
+    def signed_area2d(loop)
+      s = 0.0
+      n = loop.length
+      n.times do |i|
+        ax, ay = loop[i]
+        bx, by = loop[(i + 1) % n]
+        s += ax * by - bx * ay
+      end
+      s * 0.5
+    end
   end
 end

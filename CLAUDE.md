@@ -46,9 +46,9 @@ test/*_test.rb             pure-Ruby unit tests, run with `ruby test/<name>_test
 2. **Project** each face and camera-depth via `ViewAdapter` + `Projector`.
 3. **Edges → HLR → weld → dedup → single-width polylines** grouped in
    `edges-<weight>` layers.
-4. **Shaded faces**: each face is filled WHITE (lit, dot(n, sun) > 0) or GRAY
-   (unlit), depth-sorted, so unlit sides match SketchUp self-shadow. Lit fills
-   are needed so a lit face in front hides the unlit face behind it in 2D.
+4. **Unlit face fills**: faces whose normal points away from the sun
+   (`dot(n, sun) <= 0`) are filled GRAY so self-shadowed sides read the same as
+   cast shadows. Lit faces stay unfilled — the output has no white rectangles.
 5. **Shadows** (when `model.shadow_info['DisplayShadows']`):
    - Ground shadow: project every face along the sun onto the base plane, merge
      into one `<path>` via nonzero union.
@@ -72,9 +72,9 @@ them as layers):
   receiver, each clipped by its nearer occluders).
 - `edges-thin`, `edges-thick` — the line drawing (per-weight layers).
 
-**Faces ARE drawn as shaded fills** (white lit / gray unlit) — needed so unlit
-sides of the model read correctly and so a lit face in front occludes an unlit
-one behind it. Set `DRAW_FACES = true` to use real face colours instead.
+**Only UNLIT faces are drawn as fills** (gray). Lit faces stay unfilled so the
+output is just shadow shapes + lines on a transparent background. Set
+`DRAW_FACES = true` to use real face colours instead.
 
 ## Options (constants at the top of `main.rb`)
 
