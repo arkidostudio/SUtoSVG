@@ -59,21 +59,36 @@ module SUtoSVG
              %(width="#{fmt(width)}" height="#{fmt(height)}" ) +
              %(viewBox="0 0 #{fmt(width)} #{fmt(height)}">)
 
-      # SVG <mask>s to hide shadow bleed-through: ground shadow behind the
-      # building, face-shadows behind nearer geometry. Grayscale (white=show,
-      # black=hide); black silhouettes union naturally in raster space so no
-      # polygon boolean is needed. Masks live in <defs> only — nothing visible.
+      # Bucket face-shadows by mask content: shadows sharing the same
+      # occluder set collapse into ONE merged path referencing ONE mask.
+      # Every shadow is the same tone, so painter's order between buckets
+      # doesn't matter (overlap paints gray either way).
+      buckets = {} # key => { loops:, polys:, faces_seen: }
+      face_fills = []
+      fills.each do |item|
+        if item.is_a?(Hash)
+          key = mask_key(item[:mask_loops])
+          b = (buckets[key] ||= { loops: item[:mask_loops] || [], polys: [] })
+          b[:polys].concat(item[:polys])
+        elsif visible?(item)
+          face_fills << item
+        end
+      end
+
       up = merged_shape(shadow_polys, dx, dy)
       mask_specs = []
       mask_specs << { id: 'mask-ground', loops: ground_mask } if up && ground_mask.any?
-      fills.each_with_index do |item, i|
-        next unless item.is_a?(Hash) && item[:mask_loops] && !item[:mask_loops].empty?
-        mask_specs << { id: "mask-fs-#{i}", loops: item[:mask_loops] }
+      mask_id_by_key = {}
+      buckets.each do |k, b|
+        next if k == :none
+        id = "mask-fs-#{mask_id_by_key.size}"
+        mask_id_by_key[k] = id
+        mask_specs << { id: id, loops: b[:loops] }
       end
       out.concat(mask_defs(mask_specs, dx, dy, width, height))
 
-      # Ground shadow. Shadow tone is baked into the fill via
-      # `blended_shadow_gray` — no layer-level opacity (would double-blend).
+      # Ground shadow. Tone baked into the fill via blended_shadow_gray so
+      # no layer-level opacity (would double-blend).
       unless up.nil? && shadow_lines.empty?
         out << %(  <g id="shadow-ground" inkscape:groupmode="layer" ) +
                %(inkscape:label="shadow-ground">)
@@ -86,25 +101,15 @@ module SUtoSVG
         out << '  </g>'
       end
 
-      # Face fills + face-shadows, depth-ordered. Face-shadows are each masked
-      # by strictly-nearer face silhouettes so they don't leak in front of the
-      # receiver. Layer is "faces" if any face fill was emitted, else
-      # "shadow-faces" (shadows-only output).
-      rendered = []
-      any_face = false
-      fills.each_with_index do |item, i|
-        if item.is_a?(Hash)
-          cp = merged_shape(item[:polys], dx, dy)
-          next unless cp
-          cp = apply_mask(cp, "mask-fs-#{i}") if item[:mask_loops] && !item[:mask_loops].empty?
-          rendered << cp
-        elsif visible?(item)
-          rendered << face_element(item, dx, dy)
-          any_face = true
-        end
+      rendered = face_fills.map { |f| face_element(f, dx, dy) }
+      buckets.each do |k, b|
+        cp = merged_shape(b[:polys], dx, dy)
+        next unless cp
+        cp = apply_mask(cp, mask_id_by_key[k]) if k != :none
+        rendered << cp
       end
       unless rendered.empty?
-        out << layer_open(any_face ? 'faces' : 'shadow-faces', nil)
+        out << layer_open(face_fills.empty? ? 'shadow-faces' : 'faces', nil)
         rendered.each { |el| out << '    ' + el }
         out << '  </g>'
       end
@@ -194,6 +199,15 @@ module SUtoSVG
 
     def apply_mask(el, mask_id)
       el.sub(/<(polygon|path) /, %(<\\1 mask="url(##{mask_id})" ))
+    end
+
+    # Canonical, order-independent identity for a set of mask loops. Two shadows
+    # with the same occluder set map to the same key -> one mask, one merged
+    # path. Loops rounded to 2dp (matches fmt() output) so tiny fp differences
+    # don't fragment the buckets.
+    def mask_key(loops)
+      return :none if loops.nil? || loops.empty?
+      loops.map { |l| l.map { |(x, y)| [x.round(2), y.round(2)] }.sort }.sort
     end
 
     # --- geometry helpers --------------------------------------------------
