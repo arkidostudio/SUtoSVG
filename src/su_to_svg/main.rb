@@ -273,6 +273,7 @@ module SUtoSVG
 
       loops2d = wf.loops.map { |loop| loop.map { |p| adapter.project(p.to_a) } }
       out << {
+        face:    wf,
         loops2d: loops2d,
         bbox2d:  bbox2d(loops2d),
         plane:   [wf.center.to_a, wf.normal.to_a],
@@ -300,12 +301,13 @@ module SUtoSVG
 
     if RECEIVE_ON_FACES
       build_face_shadows(view, adapter, compute_face_shadows(model, world_faces)).each do |g|
-        # Partial occlusion: knock out any strictly-nearer face's 2D silhouette
-        # so the shadow doesn't bleed through the objects standing in front of
-        # the receiver (e.g. a small extrusion covering part of a ledge shadow).
-        nearer = projected.select { |f| f[:depth] < g[:depth] - 1e-4 }
-                          .map { |f| f[:loops2d].first }
-        items << [g[:depth], 1, { polys: g[:polys], mask_loops: nearer }]
+        # Mask by every OTHER face's silhouette (same treatment as the ground
+        # shadow), so the shadow doesn't bleed behind any nearer geometry. The
+        # receiver itself is excluded — else its silhouette would erase the
+        # whole shadow, which is drawn on top of exactly that silhouette.
+        mask = projected.reject { |f| f[:face].equal?(g[:recv]) }
+                        .map { |f| f[:loops2d].first }
+        items << [g[:depth], 1, { polys: g[:polys], mask_loops: mask }]
       end
     end
 
@@ -434,7 +436,7 @@ module SUtoSVG
       end
       next if polys.empty?
       clip = recv.loops.first.map { |p| Geom::Point3d.new(p.x, p.y, p.z) }
-      groups << { clip: clip, polys: polys, center: recv.center }
+      groups << { clip: clip, polys: polys, center: recv.center, recv: recv }
     end
     groups
   end
@@ -455,7 +457,7 @@ module SUtoSVG
         clipped = Shadow.clip_polygon(loop.map { |p| adapter.project(p.to_a) }, clip2d)
         polys2d << SvgWriter::Face.new([clipped], gray) if clipped.length >= 3
       end
-      out << { depth: Projector.depth(view, g[:center]), polys: polys2d } unless polys2d.empty?
+      out << { depth: Projector.depth(view, g[:center]), polys: polys2d, recv: g[:recv] } unless polys2d.empty?
     end
     out
   end
