@@ -301,11 +301,12 @@ module SUtoSVG
 
     if RECEIVE_ON_FACES
       build_face_shadows(view, adapter, compute_face_shadows(model, world_faces)).each do |g|
-        # Mask by every OTHER face's silhouette (same treatment as the ground
-        # shadow), so the shadow doesn't bleed behind any nearer geometry. The
-        # receiver itself is excluded — else its silhouette would erase the
-        # whole shadow, which is drawn on top of exactly that silhouette.
-        mask = projected.reject { |f| f[:face].equal?(g[:recv]) }
+        # Mask by every strictly-nearer face's silhouette (nearer at centroid
+        # depth), excluding the receiver itself. Faces farther than the
+        # receiver sit behind it in 3D, so their 2D silhouettes must NOT mask
+        # (that erases the shadow — the back of the building projects on top
+        # of the visible front in image space).
+        mask = projected.select { |f| f[:depth] < g[:depth] - 1e-4 && !f[:face].equal?(g[:recv]) }
                         .map { |f| f[:loops2d].first }
         items << [g[:depth], 1, { polys: g[:polys], mask_loops: mask }]
       end
