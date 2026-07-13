@@ -299,6 +299,17 @@ module SUtoSVG
   def build_fills(view, adapter, model, projected, world_faces)
     items = [] # [depth, tiebreak, drawable]
 
+    # Shade each face: WHITE if lit by the sun, GRAY if unlit. Lit fills are
+    # needed so a lit face in front hides the unlit face behind it in 2D.
+    sun  = model.shadow_info['SunDirection']
+    s    = [sun.x, sun.y, sun.z]
+    gray = blended_shadow_gray
+    projected.each do |f|
+      n = f[:plane][1]
+      lit = (n[0] * s[0] + n[1] * s[1] + n[2] * s[2]) > 0.0
+      items << [f[:depth], 0, SvgWriter::Face.new(f[:loops2d], lit ? SHADOW_MASK_COLOR : gray)]
+    end
+
     if RECEIVE_ON_FACES
       build_face_shadows(view, adapter, compute_face_shadows(model, world_faces)).each do |g|
         # Mask by every strictly-nearer face's silhouette (nearer at centroid
