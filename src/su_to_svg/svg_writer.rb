@@ -61,17 +61,18 @@ module SUtoSVG
 
       up = merged_shape(shadow_polys, dx, dy)
 
-      # Emit one <clipPath> per shadow that needs partial-occlusion masking:
-      # the ground shadow (masked by every object silhouette) plus each cast
-      # shadow (masked by strictly-nearer face silhouettes). Each clip is
-      # "svg bbox rect MINUS silhouettes" via clip-rule="evenodd".
-      clip_specs = []
-      clip_specs << { id: 'clip-ground', loops: ground_mask } if up && ground_mask.any?
+      # Emit one <mask> per shadow that needs partial-occlusion masking: the
+      # ground shadow (masked by every object silhouette) plus each cast shadow
+      # (masked by strictly-nearer face silhouettes). Using <mask> instead of
+      # <clipPath> so overlapping silhouettes union in raster space — clipPath
+      # + evenodd would toggle overlaps back to "inside" and leak the shadow.
+      mask_specs = []
+      mask_specs << { id: 'mask-ground', loops: ground_mask } if up && ground_mask.any?
       fills.each_with_index do |item, i|
         next unless item.is_a?(Hash) && item[:mask_loops] && !item[:mask_loops].empty?
-        clip_specs << { id: "clip-fs-#{i}", loops: item[:mask_loops] }
+        mask_specs << { id: "mask-fs-#{i}", loops: item[:mask_loops] }
       end
-      out.concat(clip_defs(clip_specs, dx, dy, width, height))
+      out.concat(mask_defs(mask_specs, dx, dy, width, height))
 
       # Ground shadow (own group, pieces merged into one shape). Zero-area
       # content (shadow seen edge-on) is culled; an empty layer is omitted.
@@ -80,7 +81,7 @@ module SUtoSVG
       unless up.nil? && shadow_lines.empty?
         out << %(  <g id="shadow-ground" inkscape:groupmode="layer" ) +
                %(inkscape:label="shadow-ground">)
-        up = merged_shape(shadow_polys, dx, dy, clip_id: 'clip-ground') if up && ground_mask.any?
+        up = merged_shape(shadow_polys, dx, dy, mask_id: 'mask-ground') if up && ground_mask.any?
         out << '    ' + up if up
         shadow_lines.each do |pts|
           out << '    ' + %(<polyline points="#{points_attr(pts, dx, dy)}" fill="none" ) +
@@ -97,8 +98,8 @@ module SUtoSVG
       any_face = false
       fills.each_with_index do |item, i|
         if item.is_a?(Hash)
-          clip_id = (item[:mask_loops] && !item[:mask_loops].empty?) ? "clip-fs-#{i}" : nil
-          cp = merged_shape(item[:polys], dx, dy, clip_id: clip_id)
+          mask_id = (item[:mask_loops] && !item[:mask_loops].empty?) ? "mask-fs-#{i}" : nil
+          cp = merged_shape(item[:polys], dx, dy, mask_id: mask_id)
           rendered << cp if cp
         elsif visible?(item)
           rendered << face_element(item, dx, dy)
@@ -155,12 +156,12 @@ module SUtoSVG
     # it directly, honouring holes via evenodd. Several faces are raw overlapping
     # pieces — merge them with a nonzero compound path (the fallback).
     # Zero-area (edge-on) content is culled; returns nil if nothing visible.
-    def merged_shape(faces, dx, dy, clip_id: nil)
+    def merged_shape(faces, dx, dy, mask_id: nil)
       faces = faces.select { |f| visible?(f) }
       return nil if faces.empty?
       el = faces.length == 1 ? face_element(faces.first, dx, dy) : union_path(faces, dx, dy)
       return nil if el.nil?
-      clip_id ? el.sub(/<(polygon|path) /, %(<\\1 clip-path="url(##{clip_id})" )) : el
+      mask_id ? el.sub(/<(polygon|path) /, %(<\\1 mask="url(##{mask_id})" )) : el
     end
 
     # Merge many (overlapping) polygons into ONE <path>: each outer loop becomes
@@ -199,20 +200,21 @@ module SUtoSVG
 
     # --- geometry helpers --------------------------------------------------
 
-    # Emit one <defs> block containing all the shadow clip-paths. Each clip is
-    # "the svg bbox rect MINUS a set of silhouette loops" — evenodd fill rule
-    # counts crossings, so the outer rect is IN (1) while any silhouette hole is
-    # OUT (2). Result: shadows drawn with this clip only fill outside the holes.
-    def clip_defs(specs, dx, dy, width, height)
+    # Emit one <defs> block of grayscale <mask>s. Each mask is a white bbox rect
+    # with black silhouette paths painted on top; the shadow shows through where
+    # the mask is white. Raster black-on-black unions cleanly, so overlapping
+    # silhouettes just work — no polygon boolean needed.
+    def mask_defs(specs, dx, dy, width, height)
       valid = specs.select { |s| s[:loops] && !s[:loops].empty? }
       return [] if valid.empty?
       lines = ['  <defs>']
       valid.each do |spec|
-        outer = "M0,0 L#{fmt(width)},0 L#{fmt(width)},#{fmt(height)} L0,#{fmt(height)} Z"
-        holes = spec[:loops].map { |loop| loop_to_path(loop, dx, dy) }.join(' ')
-        lines << %(    <clipPath id="#{spec[:id]}" clip-rule="evenodd">)
-        lines << %(      <path d="#{outer} #{holes}"/>)
-        lines << '    </clipPath>'
+        lines << %(    <mask id="#{spec[:id]}" maskUnits="userSpaceOnUse">)
+        lines << %(      <rect width="#{fmt(width)}" height="#{fmt(height)}" fill="white"/>)
+        spec[:loops].each do |loop|
+          lines << %(      <path d="#{loop_to_path(loop, dx, dy)}" fill="black"/>)
+        end
+        lines << '    </mask>'
       end
       lines << '  </defs>'
       lines
