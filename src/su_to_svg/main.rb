@@ -207,26 +207,26 @@ module SUtoSVG
     bias       = HLR_BIAS_FRAC * world_diagonal(data)
     projected  = project_faces(view, model, adapter, data[:faces])
 
-    # Shadow world-space polygons: TIG groups (if any) + our own cast shadow.
+    # Ground shadow world-space polygons: TIG groups (if any) + our own cast.
     shadow_world = []
     shadow_world += data[:shadow_faces].map(&:loops) if EXPORT_SHADOWS
     shadow_world += compute_cast_shadow(model, data[:faces]) if EXPORT_CAST_SHADOW
     shadow_polys, shadow_lines = build_shadows(view, adapter, shadow_world, data[:shadow_edges])
     has_cast_shadow = shadow_polys.any? || shadow_lines.any?
 
-    # Fills layer: real colours if DRAW_FACES; else, when a shadow is present,
-    # shaded faces (white lit / gray shaded) plus cast shadows onto other faces,
-    # all depth-ordered so everything occludes correctly. No shadow -> no fills.
+    # Cast-shadow shapes (shadows landing on other faces), depth-ordered so a
+    # shadow on a nearer face draws over one on a farther face. Object faces
+    # themselves are not drawn — the output is just lines + shadows.
     fills =
       if DRAW_FACES
         faces_to_svg(projected)
-      elsif MASK_SHADOW && has_cast_shadow
+      elsif RECEIVE_ON_FACES && model.shadow_info['DisplayShadows']
         build_fills(view, adapter, model, projected, data[:faces])
       else
         []
       end
 
-    svg_edges  = DRAW_EDGES ? build_svg_edges(view, adapter, projected, data[:edges], bias) : []
+    svg_edges = DRAW_EDGES ? build_svg_edges(view, adapter, projected, data[:edges], bias) : []
     Weld.close_gaps(svg_edges, threshold: WELD_GAP_PX) if DRAW_EDGES && WELD_GAP_PX > 0.0
 
     if fills.empty? && svg_edges.empty? && shadow_polys.empty? && shadow_lines.empty?
@@ -235,17 +235,23 @@ module SUtoSVG
       return
     end
 
+    # 2D silhouettes of every visible face — used to build masks that hide
+    # shadow bleed-through behind objects (ground shadow behind buildings,
+    # face-shadows on faces occluded by nearer objects).
+    silhouettes = projected.map { |f| f[:loops2d].first }
+
     svg = SvgWriter.build(fills, svg_edges, margin: SVG_MARGIN,
                           shadow_polys: shadow_polys, shadow_lines: shadow_lines,
-                          shadow_fill: SHADOW_FILL, shadow_opacity: SHADOW_OPACITY)
+                          shadow_fill: blended_shadow_gray, shadow_opacity: SHADOW_OPACITY,
+                          ground_mask: silhouettes)
 
     path = UI.savepanel('Export Selection to SVG', default_dir(model), 'selection.svg')
     return if path.nil? # user cancelled
 
     path += '.svg' unless path.downcase.end_with?('.svg')
     File.write(path, svg)
-    nshadow = shadow_polys.length + shadow_lines.length
-    shadow_note = nshadow.positive? ? ", #{nshadow} shadow shapes" : ''
+    has_shadow = has_cast_shadow || !cast_groups.empty?
+    shadow_note = has_shadow ? ', with shadows' : ''
     Sketchup.status_text =
       "SUtoSVG: exported #{svg_edges.length} edge segments#{shadow_note} to #{path}"
   rescue => e
@@ -284,34 +290,30 @@ module SUtoSVG
       .map { |f| SvgWriter::Face.new(f[:loops2d], f[:fill]) }
   end
 
-  # Build the depth-ordered fills: shaded object faces (white lit / gray
-  # self-shaded) mixed with cast-shadow groups (gray, clipped to the face they
-  # land on). Everything is back-to-front sorted so opaque faces occlude the
-  # ground shadow and each other, and a cast shadow is covered by nearer objects.
+  # Build the depth-ordered fills: only cast-shadow groups (shadows landing on
+  # other faces). Object faces themselves are NOT drawn — the output is just
+  # lines + shadows. Faces are still used internally as HLR occluders and to
+  # generate the shadow shapes; they just don't appear as filled polygons.
+  # Depth-ordered so a shadow on a nearer face draws over one on a farther face.
   def build_fills(view, adapter, model, projected, world_faces)
-    sun = model.shadow_info['SunDirection']
-    s = [sun.x, sun.y, sun.z]
-    gray = blended_shadow_gray
-
     items = [] # [depth, tiebreak, drawable]
-    projected.each do |f|
-      n = f[:plane][1]
-      lit = (n[0] * s[0] + n[1] * s[1] + n[2] * s[2]) > 0.0
-      items << [f[:depth], 0, SvgWriter::Face.new(f[:loops2d], lit ? SHADOW_MASK_COLOR : gray)]
-    end
 
     if RECEIVE_ON_FACES
       build_face_shadows(view, adapter, compute_face_shadows(model, world_faces)).each do |g|
-        # tiebreak 1 => at equal depth the shadow draws just after its receiver.
-        items << [g[:depth], 1, { clip: g[:clip], polys: g[:polys] }]
+        # Partial occlusion: knock out any strictly-nearer face's 2D silhouette
+        # so the shadow doesn't bleed through the objects standing in front of
+        # the receiver (e.g. a small extrusion covering part of a ledge shadow).
+        nearer = projected.select { |f| f[:depth] < g[:depth] - 1e-4 }
+                          .map { |f| f[:loops2d].first }
+        items << [g[:depth], 1, { polys: g[:polys], mask_loops: nearer }]
       end
     end
 
     items.sort_by { |depth, tie, _| [-depth, tie] }.map { |_, _, item| item }
   end
 
-  # The shadow colour composited over white at SHADOW_OPACITY, so opaque shaded
-  # faces read the same tone as the (semi-transparent) ground shadow layer.
+  # The shadow colour composited over white at SHADOW_OPACITY, used opaque so
+  # every shadow reads the same tone and occludes correctly.
   def blended_shadow_gray
     r = SHADOW_FILL[1, 2].to_i(16)
     g = SHADOW_FILL[3, 2].to_i(16)
@@ -352,11 +354,12 @@ module SUtoSVG
   # 2D filled polygons. A LINES-type TIG shadow (no faces) falls back to stroked
   # outlines from shadow_edges. Returns [polys, lines].
   def build_shadows(view, adapter, shadow_world, shadow_edges)
+    gray = blended_shadow_gray
     polys = []
     shadow_world.each do |loops|
       next if loops.flatten.any? { |p| Projector.behind_camera?(view, p) }
       loops2d = loops.map { |loop| loop.map { |p| adapter.project(p.to_a) } }
-      polys << SvgWriter::Face.new(loops2d, SHADOW_FILL)
+      polys << SvgWriter::Face.new(loops2d, gray)
     end
 
     lines = []
@@ -447,9 +450,12 @@ module SUtoSVG
       polys2d = []
       g[:polys].each do |loop|
         next if loop.any? { |p| Projector.behind_camera?(view, p) }
-        polys2d << SvgWriter::Face.new([loop.map { |p| adapter.project(p.to_a) }], gray)
+        # Bake the receiving-face clip in NOW (pure-Ruby 2D clip), so the SVG
+        # gets a plain pre-trimmed shape — no clipPath masks to untangle.
+        clipped = Shadow.clip_polygon(loop.map { |p| adapter.project(p.to_a) }, clip2d)
+        polys2d << SvgWriter::Face.new([clipped], gray) if clipped.length >= 3
       end
-      out << { depth: Projector.depth(view, g[:center]), clip: clip2d, polys: polys2d } unless polys2d.empty?
+      out << { depth: Projector.depth(view, g[:center]), polys: polys2d } unless polys2d.empty?
     end
     out
   end

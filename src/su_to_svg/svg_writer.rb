@@ -4,40 +4,48 @@
 # `ruby` interpreter. It takes already-projected 2D geometry (screen pixels),
 # normalizes it to a bounding box, and emits a well-formed SVG string.
 #
-# Edges are split into named, selectable layer groups by weight class (thin,
-# medium, thick), drawn thin -> thick so heavier lines sit on top. The groups
-# carry Inkscape layer attributes so vector editors expose them as layers.
+# The ground shadow is its own layer (pieces merged into one shape). Object
+# faces and cast-onto-face shadows are drawn as ONE depth-ordered list (`fills`,
+# a mix of Face and clipped shadow groups) so a nearer object correctly hides a
+# shadow on a farther face. Edges are split into per-weight layers on top.
 #
 # Data contract:
-#   Face.loops  : Array of loops. loops[0] is the OUTER loop; loops[1..] holes.
-#                 Each loop is an Array of [x, y] pairs (floats, screen pixels).
+#   Face.loops  : Array of loops. loops[0] outer; loops[1..] holes. Each loop is
+#                 an Array of [x, y] pairs (floats, screen pixels).
 #   Face.fill   : "#rrggbb" string.
 #   Edge.points : Array of [x, y] pairs (a polyline).
 #   Edge.width  : stroke width in px.
-#   Edge.layer  : layer key (:thin/:medium/:thick), or nil for a single group.
+#   Edge.layer  : layer key (:thin/:medium/:thick), or nil.
+#   fills item  : a Face, OR { polys: [Face...] } (a shadow cast onto a
+#                 receiving face, already clipped to it; merged into one path).
 
 module SUtoSVG
   module SvgWriter
     Face = Struct.new(:loops, :fill)
     Edge = Struct.new(:points, :width, :layer)
 
-    # Draw order (and layer stacking): earlier = underneath.
     LAYER_ORDER = %i[thin medium thick].freeze
+
+    # Shapes with less area than this (px²) are invisible — e.g. faces seen
+    # edge-on in a straight-on view collapse to zero-area lines. They are culled
+    # so the export contains only real, visible shapes.
+    MIN_AREA = 0.5
 
     module_function
 
-    # fills         : Array, drawn back-to-front, of EITHER a Face OR a clipped
-    #                 shadow group { clip: [[x,y]...], polys: [Face...] } (a
-    #                 shadow cast onto a receiving face, clipped to it). Mixing
-    #                 the two lets cast shadows occlude correctly by depth.
-    # edges         : Array<Edge>.
-    # shadow_polys  : Array<Face> — ground shadow areas (own layer, at bottom).
-    # shadow_lines  : Array of [[x,y],[x,y]] — shadow outlines (LINES-type).
-    # margin        : uniform padding (px) added around the content bounds.
-    def build(fills, edges, shadow_polys: [], shadow_lines: [],
-              shadow_fill: '#808080', shadow_opacity: 0.5, margin: 0.0)
+    # fills        : Array of Face | { polys:, mask_loops: } (back-to-front). A
+    #                Hash item is a shadow cast onto a receiving face; its
+    #                `mask_loops` are 2D outer loops of strictly-nearer faces
+    #                that must be knocked out (partial-occlusion HLR).
+    # edges        : Array<Edge>.
+    # shadow_polys : Array<Face> — the ground shadow (merged into one shape).
+    # shadow_lines : Array of [[x,y],[x,y]] — ground shadow outlines (LINES-type).
+    # ground_mask  : Array of 2D outer loops — every object silhouette. Used to
+    #                clip the ground shadow so it doesn't bleed through objects.
+    def build(fills, edges, shadow_polys: [], shadow_lines: [], shadow_fill: '#808080',
+              shadow_opacity: 0.5, margin: 0.0, ground_mask: [])
       min_x, min_y, max_x, max_y = bounds(fills, edges, shadow_polys, shadow_lines)
-      return empty_svg if min_x.nil? # nothing to draw
+      return empty_svg if min_x.nil?
 
       dx = margin - min_x
       dy = margin - min_y
@@ -51,13 +59,29 @@ module SUtoSVG
              %(width="#{fmt(width)}" height="#{fmt(height)}" ) +
              %(viewBox="0 0 #{fmt(width)} #{fmt(height)}">)
 
-      out.concat(clip_defs(fills, dx, dy))
+      up = merged_shape(shadow_polys, dx, dy)
 
-      # Ground shadows go at the bottom, in their own selectable layer.
-      unless shadow_polys.empty? && shadow_lines.empty?
-        out << %(  <g id="shadows" inkscape:groupmode="layer" inkscape:label="shadows" ) +
-               %(opacity="#{fmt(shadow_opacity)}">)
-        shadow_polys.each { |f| out << '    ' + face_element(f, dx, dy) }
+      # Emit one <clipPath> per shadow that needs partial-occlusion masking:
+      # the ground shadow (masked by every object silhouette) plus each cast
+      # shadow (masked by strictly-nearer face silhouettes). Each clip is
+      # "svg bbox rect MINUS silhouettes" via clip-rule="evenodd".
+      clip_specs = []
+      clip_specs << { id: 'clip-ground', loops: ground_mask } if up && ground_mask.any?
+      fills.each_with_index do |item, i|
+        next unless item.is_a?(Hash) && item[:mask_loops] && !item[:mask_loops].empty?
+        clip_specs << { id: "clip-fs-#{i}", loops: item[:mask_loops] }
+      end
+      out.concat(clip_defs(clip_specs, dx, dy, width, height))
+
+      # Ground shadow (own group, pieces merged into one shape). Zero-area
+      # content (shadow seen edge-on) is culled; an empty layer is omitted.
+      # NOTE: shadow tone is baked into the fill color via `blended_shadow_gray`,
+      # so NO layer-level opacity here (that would double-blend and lighten it).
+      unless up.nil? && shadow_lines.empty?
+        out << %(  <g id="shadow-ground" inkscape:groupmode="layer" ) +
+               %(inkscape:label="shadow-ground">)
+        up = merged_shape(shadow_polys, dx, dy, clip_id: 'clip-ground') if up && ground_mask.any?
+        out << '    ' + up if up
         shadow_lines.each do |pts|
           out << '    ' + %(<polyline points="#{points_attr(pts, dx, dy)}" fill="none" ) +
                  %(stroke="#{shadow_fill}" stroke-width="1"/>)
@@ -65,26 +89,31 @@ module SUtoSVG
         out << '  </g>'
       end
 
-      # Faces and cast-shadow groups, depth-ordered together.
-      unless fills.empty?
-        out << layer_open('faces', nil)
-        clip_i = 0
-        fills.each do |item|
-          if item.is_a?(Hash) # clipped cast-shadow group
-            out << %(    <g clip-path="url(#sfclip#{clip_i})">)
-            item[:polys].each { |f| out << '      ' + face_element(f, dx, dy) }
-            out << '    </g>'
-            clip_i += 1
-          else
-            out << '    ' + face_element(item, dx, dy)
-          end
+      # Object faces + cast-onto-face shadows, depth-ordered together so they
+      # occlude correctly. Cast shadows arrive pre-clipped to their receiving
+      # face, so each draws as a plain merged shape — no clipPath masks.
+      # Edge-on (zero-area) faces and shadows are culled.
+      rendered = []
+      any_face = false
+      fills.each_with_index do |item, i|
+        if item.is_a?(Hash)
+          clip_id = (item[:mask_loops] && !item[:mask_loops].empty?) ? "clip-fs-#{i}" : nil
+          cp = merged_shape(item[:polys], dx, dy, clip_id: clip_id)
+          rendered << cp if cp
+        elsif visible?(item)
+          rendered << face_element(item, dx, dy)
+          any_face = true
         end
+      end
+      unless rendered.empty?
+        layer_id = any_face ? 'faces' : 'shadow-faces'
+        out << layer_open(layer_id, nil)
+        rendered.each { |el| out << '    ' + el }
         out << '  </g>'
       end
 
       grouped = edges.group_by { |e| e.layer }
-      layer_keys = LAYER_ORDER + (grouped.keys - LAYER_ORDER) # known order first
-      layer_keys.each do |key|
+      (LAYER_ORDER + (grouped.keys - LAYER_ORDER)).each do |key|
         es = grouped[key]
         next if es.nil? || es.empty?
         out << layer_open("edges-#{key || 'all'}", es.first.width)
@@ -111,8 +140,7 @@ module SUtoSVG
     def face_element(face, dx, dy)
       loops = face.loops
       if loops.length <= 1
-        pts = points_attr(loops[0] || [], dx, dy)
-        %(<polygon points="#{pts}" fill="#{face.fill}"/>)
+        %(<polygon points="#{points_attr(loops[0] || [], dx, dy)}" fill="#{face.fill}"/>)
       else
         d = loops.map { |loop| loop_to_path(loop, dx, dy) }.join(' ')
         %(<path d="#{d}" fill-rule="evenodd" fill="#{face.fill}"/>)
@@ -123,24 +151,74 @@ module SUtoSVG
       %(<polyline points="#{points_attr(edge.points, dx, dy)}"/>)
     end
 
+    # One shape for a shadow. A single face is a true (pre-computed) union — draw
+    # it directly, honouring holes via evenodd. Several faces are raw overlapping
+    # pieces — merge them with a nonzero compound path (the fallback).
+    # Zero-area (edge-on) content is culled; returns nil if nothing visible.
+    def merged_shape(faces, dx, dy, clip_id: nil)
+      faces = faces.select { |f| visible?(f) }
+      return nil if faces.empty?
+      el = faces.length == 1 ? face_element(faces.first, dx, dy) : union_path(faces, dx, dy)
+      return nil if el.nil?
+      clip_id ? el.sub(/<(polygon|path) /, %(<\\1 clip-path="url(##{clip_id})" )) : el
+    end
+
+    # Merge many (overlapping) polygons into ONE <path>: each outer loop becomes
+    # a subpath, all wound the same way, filled nonzero so the result is their
+    # union — contiguous pieces read as one shape, no internal seams. Degenerate
+    # (zero-area) loops are dropped; exact duplicate loops collapse to one.
+    def union_path(faces, dx, dy)
+      loops = faces.map { |f| normalize_winding(f.loops[0] || []) }
+                   .select { |l| l.length >= 3 && signed_area(l).abs >= MIN_AREA }
+      loops = loops.uniq { |l| l.map { |(x, y)| [x.round(2), y.round(2)] }.sort }
+      return nil if loops.empty?
+      d = loops.map { |loop| loop_to_path(loop, dx, dy) }.join(' ')
+      %(<path d="#{d}" fill-rule="nonzero" fill="#{faces.first.fill}"/>)
+    end
+
+    # A face is worth drawing if its outer loop encloses visible area.
+    def visible?(face)
+      outer = face.loops[0]
+      !outer.nil? && outer.length >= 3 && signed_area(outer).abs >= MIN_AREA
+    end
+
+    def normalize_winding(loop)
+      signed_area(loop).negative? ? loop.reverse : loop
+    end
+
+    def signed_area(loop)
+      s = 0.0
+      n = loop.length
+      n.times do |i|
+        ax, ay = loop[i]
+        bx, by = loop[(i + 1) % n]
+        s += ax * by - bx * ay
+      end
+      s * 0.5
+    end
+
     # --- geometry helpers --------------------------------------------------
 
-    # <clipPath> definitions for every clipped cast-shadow group in `fills`,
-    # numbered in the same order they are drawn.
-    def clip_defs(fills, dx, dy)
-      groups = fills.select { |x| x.is_a?(Hash) }
-      return [] if groups.empty?
+    # Emit one <defs> block containing all the shadow clip-paths. Each clip is
+    # "the svg bbox rect MINUS a set of silhouette loops" — evenodd fill rule
+    # counts crossings, so the outer rect is IN (1) while any silhouette hole is
+    # OUT (2). Result: shadows drawn with this clip only fill outside the holes.
+    def clip_defs(specs, dx, dy, width, height)
+      valid = specs.select { |s| s[:loops] && !s[:loops].empty? }
+      return [] if valid.empty?
       lines = ['  <defs>']
-      groups.each_with_index do |g, i|
-        lines << %(    <clipPath id="sfclip#{i}"><polygon points="#{points_attr(g[:clip], dx, dy)}"/></clipPath>)
+      valid.each do |spec|
+        outer = "M0,0 L#{fmt(width)},0 L#{fmt(width)},#{fmt(height)} L0,#{fmt(height)} Z"
+        holes = spec[:loops].map { |loop| loop_to_path(loop, dx, dy) }.join(' ')
+        lines << %(    <clipPath id="#{spec[:id]}" clip-rule="evenodd">)
+        lines << %(      <path d="#{outer} #{holes}"/>)
+        lines << '    </clipPath>'
       end
       lines << '  </defs>'
       lines
     end
 
     # Returns [min_x, min_y, max_x, max_y], or all-nil if there are no points.
-    # Cast-shadow polys are clipped to their receiving face, so only the clip
-    # loop contributes to the canvas bounds (not the unclipped projection).
     def bounds(fills, edges, shadow_polys = [], shadow_lines = [])
       min_x = min_y = max_x = max_y = nil
       visit = lambda do |x, y|
@@ -150,11 +228,8 @@ module SUtoSVG
         max_y = y if max_y.nil? || y > max_y
       end
       fills.each do |item|
-        if item.is_a?(Hash)
-          item[:clip].each { |(x, y)| visit.call(x, y) }
-        else
-          item.loops.each { |loop| loop.each { |(x, y)| visit.call(x, y) } }
-        end
+        faces = item.is_a?(Hash) ? item[:polys] : [item]
+        faces.each { |f| f.loops.each { |loop| loop.each { |(x, y)| visit.call(x, y) } } }
       end
       shadow_polys.each { |f| f.loops.each { |loop| loop.each { |(x, y)| visit.call(x, y) } } }
       edges.each { |e| e.points.each { |(x, y)| visit.call(x, y) } }
@@ -179,7 +254,6 @@ module SUtoSVG
         %(<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1" viewBox="0 0 1 1"/>\n)
     end
 
-    # Compact number formatting: 2 decimals, trailing zeros stripped.
     def fmt(n)
       s = format('%.2f', n.to_f)
       s = s.sub(/\.?0+$/, '') if s.include?('.')

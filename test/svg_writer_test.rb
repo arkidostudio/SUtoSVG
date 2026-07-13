@@ -65,16 +65,56 @@ check('omits edge layers when there are no edges', !svg2.include?('id="edges-'))
 svg3 = SvgWriter.build([], [])
 check('empty input yields a valid <svg>', svg3.include?('<svg') && svg3.include?('viewBox'))
 
-# Shadows render in their own layer, at the bottom, under the edges.
-shadow = Face.new([[[0, 0], [20, 0], [20, 20], [0, 20]]], '#808080')
+# Ground shadow: its own layer, merged into one path, under the edges.
+g1 = Face.new([[[0, 0], [20, 0], [20, 20], [0, 20]]], '#c0c0c0')
+g2 = Face.new([[[10, 5], [30, 5], [30, 25], [10, 25]]], '#c0c0c0') # overlaps g1
 edge4  = Edge.new([[5, 5], [15, 15]], 1.0, :thin)
-svg4 = SvgWriter.build([], [edge4], shadow_polys: [shadow], shadow_opacity: 0.5, margin: 0.0)
-check('shadows get their own labelled layer',
-      svg4.include?('id="shadows"') && svg4.include?('inkscape:label="shadows"'))
-check('shadow layer carries its opacity', svg4.include?('opacity="0.5"'))
+svg4 = SvgWriter.build([], [edge4], shadow_polys: [g1, g2], margin: 0.0)
+check('ground shadow gets its own labelled layer',
+      svg4.include?('id="shadow-ground"') && svg4.include?('inkscape:label="shadow-ground"'))
+check('ground shadow is merged into one path (not many polygons)',
+      svg4.scan(/<path/).length == 1 && !svg4.include?('<polygon'))
+check('merged path uses nonzero union', svg4.include?('fill-rule="nonzero"'))
 check('shadow layer is drawn before (under) the edges',
-      svg4.index('id="shadows"') < svg4.index('id="edges-thin"'))
-check('shadow bounds are included in the canvas', svg4.include?('viewBox="0 0 20 20"'))
+      svg4.index('id="shadow-ground"') < svg4.index('id="edges-thin"'))
+
+# Fills: a face and a cast-shadow group are drawn together (depth-ordered);
+# the cast group arrives PRE-CLIPPED and draws as a plain shape — no clipPath.
+face_white = Face.new([[[0, 0], [10, 0], [10, 10], [0, 10]]], '#ffffff')
+cast = { polys: [Face.new([[[22, 2], [34, 2], [34, 18], [22, 18]]], '#c0c0c0'),
+                 Face.new([[[28, 2], [38, 2], [38, 18], [28, 18]]], '#c0c0c0')] } # two overlapping pieces
+svg5 = SvgWriter.build([face_white, cast], [], margin: 0.0)
+check('faces + cast shadows share the faces layer', svg5.include?('id="faces"'))
+check('no clipPath masks anywhere in the output',
+      !svg5.include?('clipPath') && !svg5.include?('clip-path'))
+check('overlapping cast pieces merge via nonzero', svg5.include?('fill-rule="nonzero"'))
+
+# A single, pre-unioned face (with a hole) is drawn directly, honouring the hole.
+holed = Face.new([[[0, 0], [40, 0], [40, 40], [0, 40]], [[10, 10], [30, 10], [30, 30], [10, 30]]], '#c0c0c0')
+svg6 = SvgWriter.build([], [], shadow_polys: [holed], margin: 0.0)
+check('a pre-unioned shadow with a hole uses evenodd', svg6.include?('fill-rule="evenodd"'))
+
+# When only cast shadows are drawn (no object face fills), the layer is named
+# "shadow-faces" — the writer distinguishes shadow-only content from mixed.
+cast_only = { polys: [Face.new([[[0, 0], [30, 0], [30, 30], [0, 30]]], '#c0c0c0')] }
+svg_so = SvgWriter.build([cast_only], [], margin: 0.0)
+check('shadow-only fills use the shadow-faces layer id', svg_so.include?('id="shadow-faces"'))
+check('shadow-only fills omit the faces layer id', !svg_so.include?('id="faces"'))
+
+# Degenerate (edge-on) geometry is culled: zero-area faces, zero-area shadow
+# pieces, duplicate loops — and empty layers are omitted entirely.
+flat_face   = Face.new([[[8, 100], [8, 100], [267, 100], [267, 100]]], '#ffffff') # zero area
+real_face   = Face.new([[[0, 0], [50, 0], [50, 50], [0, 50]]], '#ffffff')
+flat_shadow = Face.new([[[8, 787], [267, 787], [8, 787], [267, 787]]], '#c0c0c0')
+dup_a       = Face.new([[[0, 60], [40, 60], [40, 90], [0, 90]]], '#c0c0c0')
+dup_b       = Face.new([[[0, 60], [40, 60], [40, 90], [0, 90]]], '#c0c0c0') # identical
+svg6 = SvgWriter.build([flat_face, real_face, { polys: [flat_shadow] }, { polys: [dup_a, dup_b, flat_shadow] }],
+                       [], shadow_polys: [flat_shadow], margin: 0.0)
+check('zero-area faces are culled', svg6.scan(/<polygon/).length == 1)
+check('edge-on ground shadow omits the whole layer', !svg6.include?('shadow-ground'))
+check('degenerate pieces + duplicate loops collapse to one nonzero subpath',
+      svg6.scan(/fill-rule="nonzero"/).length == 1 &&
+      svg6[/d="([^"]*)" fill-rule="nonzero"/, 1].scan(/M/).length == 1)
 
 # Number formatting: trailing zeros stripped, decimals kept.
 check('fmt strips trailing zeros', SvgWriter.fmt(30.0) == '30')
