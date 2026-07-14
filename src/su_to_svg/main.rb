@@ -300,16 +300,14 @@ module SUtoSVG
     s    = [sun.x, sun.y, sun.z]
     gray = blended_shadow_gray
 
-    # Self-shadow: emit each in-shadow face's silhouette as a shadow shape.
-    # A face is in shadow when either (a) its normal points away from the sun,
-    # or (b) its normal faces the sun but another face BLOCKS the sun ray —
-    # SketchUp-style occlusion. Case (b) catches cavity interiors like the
-    # mailbox back wall, whose normal happens to face the sun but which is
-    # actually dark because it sits behind the mailbox front.
+    # Self-shadow: unlit faces are uniformly in shadow — emit each whole face
+    # silhouette as a shadow shape. The mask uses each nearer face's FULL
+    # loops2d (outer + holes), so light through a nearer occluder's hole
+    # re-reveals the shadow behind — e.g. the cavity walls visible through the
+    # mailbox slot.
     projected.each do |f|
       n = f[:plane][1]
-      normal_lit = (n[0] * s[0] + n[1] * s[1] + n[2] * s[2]) > 1e-6
-      next if normal_lit && !sun_occluded?(model, f, s)
+      next if (n[0] * s[0] + n[1] * s[1] + n[2] * s[2]) > 0.0 # lit, skip
       mask = projected.select { |o| o[:depth] < f[:depth] - 1e-4 }
                       .map { |o| o[:loops2d] }
       items << [f[:depth], 0, { polys: [SvgWriter::Face.new(f[:loops2d], gray)],
@@ -473,20 +471,6 @@ module SUtoSVG
       out << { depth: Projector.depth(view, g[:center]), polys: polys2d } unless polys2d.empty?
     end
     out
-  end
-
-  # True when a ray from `face`'s centroid toward the sun hits any other
-  # geometry — i.e. the sun is blocked, so the face is in shadow even though
-  # its normal points sunward. Uses SketchUp's built-in ray-test; nudges the
-  # origin slightly along the face normal so we don't self-intersect.
-  def sun_occluded?(model, face, sundir)
-    c  = face[:plane][0]
-    n  = face[:plane][1]
-    origin = Geom::Point3d.new(c[0] + n[0] * 0.001,
-                               c[1] + n[1] * 0.001,
-                               c[2] + n[2] * 0.001)
-    ray_dir = Geom::Vector3d.new(sundir[0], sundir[1], sundir[2])
-    !model.raytest([origin, ray_dir], true).nil?
   end
 
   def dot3(a, b)
