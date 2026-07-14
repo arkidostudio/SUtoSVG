@@ -400,11 +400,13 @@ module SUtoSVG
     ground = ground_z(world_faces)
     out = []
     world_faces.each do |wf|
-      loops = wf.loops.map do |loop|
-        projected = Shadow.project_loop(loop.map { |p| [p.x, p.y, p.z] }, dir, ground)
-        projected && projected.map { |q| Geom::Point3d.new(q[0], q[1], q[2]) }
-      end
-      out << loops unless loops.include?(nil)
+      # Only project the OUTER loop. Inner loops on a face aren't necessarily
+      # light gaps at the ground plane (a slot into a solid box is a hole in
+      # the FACE but not a light path to the ground). Projecting them as
+      # ground-shadow holes creates phantom gaps in the shadow.
+      projected = Shadow.project_loop(wf.loops.first.map { |p| [p.x, p.y, p.z] }, dir, ground)
+      next if projected.nil?
+      out << [projected.map { |q| Geom::Point3d.new(q[0], q[1], q[2]) }]
     end
     out
   end
