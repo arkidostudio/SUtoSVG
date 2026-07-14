@@ -37,10 +37,6 @@ module SUtoSVG
   EXPORT_SHADOWS    = true
   SHADOW_FILL       = '#808080'
   SHADOW_OPACITY    = 0.5
-  # Knock the shadow out from behind the objects (so it isn't drawn over them)
-  # by masking with opaque object silhouettes. Assumes a white page background.
-  MASK_SHADOW       = true
-  SHADOW_MASK_COLOR = '#ffffff'
   # When true, faces whose back side points at the camera are painted with the
   # back material / SketchUp's blue back-face color — faithful to the viewport,
   # but reversed faces then show up blue. When false (default), every face uses
@@ -249,8 +245,7 @@ module SUtoSVG
 
     path += '.svg' unless path.downcase.end_with?('.svg')
     File.write(path, svg)
-    has_shadow = has_cast_shadow || !cast_groups.empty?
-    shadow_note = has_shadow ? ', with shadows' : ''
+    shadow_note = has_cast_shadow ? ', with shadows' : ''
     Sketchup.status_text =
       "SUtoSVG: exported #{svg_edges.length} edge segments#{shadow_note} to #{path}"
   rescue => e

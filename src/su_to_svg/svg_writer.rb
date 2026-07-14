@@ -65,7 +65,7 @@ module SUtoSVG
       # occluder set collapse into ONE merged path referencing ONE mask.
       # Every shadow is the same tone, so painter's order between buckets
       # doesn't matter (overlap paints gray either way).
-      buckets = {} # key => { loops:, polys:, faces_seen: }
+      buckets = {} # key => { loops:, polys: }
       face_fills = []
       fills.each do |item|
         if item.is_a?(Hash)
@@ -155,10 +155,9 @@ module SUtoSVG
       %(<polyline points="#{points_attr(edge.points, dx, dy)}"/>)
     end
 
-    # One shape for a shadow. A single face is a true (pre-computed) union — draw
-    # it directly, honouring holes via evenodd. Several faces are raw overlapping
-    # pieces — merge them with a nonzero compound path (the fallback).
-    # Zero-area (edge-on) content is culled; returns nil if nothing visible.
+    # One shape for a shadow. A single visible face is drawn directly (holes via
+    # evenodd); many are boolean-unioned into one clean path. Culls edge-on
+    # content and returns nil if nothing visible.
     def merged_shape(faces, dx, dy)
       faces = faces.select { |f| visible?(f) }
       return nil if faces.empty?
@@ -183,10 +182,6 @@ module SUtoSVG
     def visible?(face)
       outer = face.loops[0]
       !outer.nil? && outer.length >= 3 && signed_area(outer).abs >= MIN_AREA
-    end
-
-    def normalize_winding(loop)
-      signed_area(loop).negative? ? loop.reverse : loop
     end
 
     def signed_area(loop)
