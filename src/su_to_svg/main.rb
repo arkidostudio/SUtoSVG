@@ -233,7 +233,7 @@ module SUtoSVG
 
     # 2D silhouettes of every face — mask the ground shadow so it doesn't
     # bleed through the building (which has no opaque fill any more).
-    silhouettes = projected.map { |f| f[:loops2d] }
+    silhouettes = projected.map { |f| f[:loops2d].first }
 
     svg = SvgWriter.build(fills, svg_edges, margin: SVG_MARGIN,
                           shadow_polys: shadow_polys, shadow_lines: shadow_lines,
@@ -301,15 +301,16 @@ module SUtoSVG
     gray = blended_shadow_gray
 
     # Self-shadow: unlit faces are uniformly in shadow — emit each whole face
-    # silhouette as a shadow shape. The mask uses each nearer face's FULL
-    # loops2d (outer + holes), so light through a nearer occluder's hole
-    # re-reveals the shadow behind — e.g. the cavity walls visible through the
-    # mailbox slot.
+    # silhouette as a shadow shape. Mask uses only OUTER silhouettes of nearer
+    # faces (no slot-as-gap): a hole in an occluder doesn't reliably pass light
+    # through to the receiver behind (the mailbox slot goes into a cavity, not
+    # through to the tower), so treating it as a gap creates phantom holes in
+    # shadows landing on farther receivers.
     projected.each do |f|
       n = f[:plane][1]
       next if (n[0] * s[0] + n[1] * s[1] + n[2] * s[2]) > 0.0 # lit, skip
       mask = projected.select { |o| o[:depth] < f[:depth] - 1e-4 }
-                      .map { |o| o[:loops2d] }
+                      .map { |o| o[:loops2d].first }
       items << [f[:depth], 0, { polys: [SvgWriter::Face.new(f[:loops2d], gray)],
                                 mask_faces: mask }]
     end
@@ -317,7 +318,7 @@ module SUtoSVG
     if RECEIVE_ON_FACES
       build_face_shadows(view, adapter, compute_face_shadows(model, world_faces)).each do |g|
         mask = projected.select { |f| f[:depth] < g[:depth] - 1e-4 }
-                        .map { |f| f[:loops2d] }
+                        .map { |f| f[:loops2d].first }
         items << [g[:depth], 1, { polys: g[:polys], mask_faces: mask }]
       end
     end
