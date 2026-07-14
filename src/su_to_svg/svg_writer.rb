@@ -61,41 +61,37 @@ module SUtoSVG
              %(width="#{fmt(width)}" height="#{fmt(height)}" ) +
              %(viewBox="0 0 #{fmt(width)} #{fmt(height)}">)
 
-      # Bucket face-shadows by mask content: shadows sharing the same
-      # occluder set collapse into ONE merged path referencing ONE mask.
-      # Every shadow is the same tone, so painter's order between buckets
-      # doesn't matter (overlap paints gray either way).
-      buckets = {} # key => { loops:, polys: }
-      face_fills = []
+      # Bake each shadow's per-receiver mask into its actual visible shape via
+      # polygon subtraction — no SVG <mask>s needed, and every visible piece is
+      # free to union with every other. Result: ONE path per layer.
+      face_fills   = []
+      shadow_polys_all = []
+      shadow_fill_color = nil
       fills.each do |item|
         if item.is_a?(Hash)
-          key = mask_key(item[:mask_loops])
-          b = (buckets[key] ||= { loops: item[:mask_loops] || [], polys: [] })
-          b[:polys].concat(item[:polys])
+          outers, holes = split_outers_and_holes(item[:polys])
+          next if outers.empty?
+          cutters = holes + (item[:mask_loops] || [])
+          visible = cutters.empty? ? Shadow.union_polygons(outers)
+                                   : Shadow.subtract_polygons(outers, cutters)
+          shadow_polys_all.concat(visible)
+          shadow_fill_color ||= item[:polys].first.fill
         elsif visible?(item)
           face_fills << item
         end
       end
 
-      up = merged_shape(shadow_polys, dx, dy)
-      mask_specs = []
-      mask_specs << { id: 'mask-ground', loops: ground_mask } if up && ground_mask.any?
-      mask_id_by_key = {}
-      buckets.each do |k, b|
-        next if k == :none
-        id = "mask-fs-#{mask_id_by_key.size}"
-        mask_id_by_key[k] = id
-        mask_specs << { id: id, loops: b[:loops] }
-      end
-      out.concat(mask_defs(mask_specs, dx, dy, width, height))
-
-      # Ground shadow. Tone baked into the fill via blended_shadow_gray so
-      # no layer-level opacity (would double-blend).
-      unless up.nil? && shadow_lines.empty?
+      # Ground shadow: subtract the object silhouettes (and any per-caster
+      # holes) so it doesn't bleed through the building. Tone baked into the
+      # fill via blended_shadow_gray.
+      ground_outers, ground_holes = split_outers_and_holes(shadow_polys)
+      ground_cutters = ground_holes + ground_mask
+      ground_visible = ground_cutters.empty? ? Shadow.union_polygons(ground_outers)
+                                             : Shadow.subtract_polygons(ground_outers, ground_cutters)
+      unless ground_visible.empty? && shadow_lines.empty?
         out << %(  <g id="shadow-ground" inkscape:groupmode="layer" ) +
                %(inkscape:label="shadow-ground">)
-        up = apply_mask(up, 'mask-ground') if up && ground_mask.any?
-        out << '    ' + up if up
+        out << '    ' + loops_to_path_element(ground_visible, shadow_fill, dx, dy) unless ground_visible.empty?
         shadow_lines.each do |pts|
           out << '    ' + %(<polyline points="#{points_attr(pts, dx, dy)}" fill="none" ) +
                  %(stroke="#{shadow_fill}" stroke-width="1"/>)
@@ -104,11 +100,8 @@ module SUtoSVG
       end
 
       rendered = face_fills.map { |f| face_element(f, dx, dy) }
-      buckets.each do |k, b|
-        cp = merged_shape(b[:polys], dx, dy)
-        next unless cp
-        cp = apply_mask(cp, mask_id_by_key[k]) if k != :none
-        rendered << cp
+      unless shadow_polys_all.empty?
+        rendered << loops_to_path_element(shadow_polys_all, shadow_fill_color || shadow_fill, dx, dy)
       end
       unless rendered.empty?
         out << layer_open(face_fills.empty? ? 'shadow-faces' : 'faces', nil)
@@ -155,29 +148,6 @@ module SUtoSVG
       %(<polyline points="#{points_attr(edge.points, dx, dy)}"/>)
     end
 
-    # One shape for a shadow. A single visible face is drawn directly (holes via
-    # evenodd); many are boolean-unioned into one clean path. Culls edge-on
-    # content and returns nil if nothing visible.
-    def merged_shape(faces, dx, dy)
-      faces = faces.select { |f| visible?(f) }
-      return nil if faces.empty?
-      faces.length == 1 ? face_element(faces.first, dx, dy) : union_path(faces, dx, dy)
-    end
-
-    # Merge many overlapping polygons into ONE clean <path> — a REAL 2D boolean
-    # union via Shadow.union_polygons, so the SVG carries the outer boundary
-    # (and any hole loops) rather than a stack of overlapping subpaths. Outer
-    # loops CCW / holes CW → fill-rule="evenodd" renders correctly.
-    def union_path(faces, dx, dy)
-      loops = faces.map { |f| f.loops[0] || [] }
-                   .select { |l| l.length >= 3 && signed_area(l).abs >= MIN_AREA }
-      return nil if loops.empty?
-      unioned = Shadow.union_polygons(loops)
-      return nil if unioned.empty?
-      d = unioned.map { |loop| loop_to_path(loop, dx, dy) }.join(' ')
-      %(<path d="#{d}" fill-rule="evenodd" fill="#{faces.first.fill}"/>)
-    end
-
     # A face is worth drawing if its outer loop encloses visible area.
     def visible?(face)
       outer = face.loops[0]
@@ -195,39 +165,32 @@ module SUtoSVG
       s * 0.5
     end
 
-    def apply_mask(el, mask_id)
-      el.sub(/<(polygon|path) /, %(<\\1 mask="url(##{mask_id})" ))
+    # Split a Face list into its outer loops (the shadow shapes) and its inner
+    # loops (holes where light passes through). Both filtered by MIN_AREA.
+    def split_outers_and_holes(faces)
+      outers = []
+      holes  = []
+      faces.each do |f|
+        (f.loops || []).each_with_index do |loop, i|
+          next if loop.nil? || loop.length < 3 || signed_area(loop).abs < MIN_AREA
+          (i.zero? ? outers : holes) << loop
+        end
+      end
+      [outers, holes]
     end
 
-    # Canonical, order-independent identity for a set of mask loops. Two shadows
-    # with the same occluder set map to the same key -> one mask, one merged
-    # path. Loops rounded to 2dp (matches fmt() output) so tiny fp differences
-    # don't fragment the buckets.
-    def mask_key(loops)
-      return :none if loops.nil? || loops.empty?
-      loops.map { |l| l.map { |(x, y)| [x.round(2), y.round(2)] }.sort }.sort
+    # Emit an array of boundary loops (outer CCW + hole CW) as ONE evenodd
+    # path. Culls loops that shrunk below MIN_AREA after subtraction.
+    def loops_to_path_element(loops, fill, dx, dy)
+      loops = loops.select { |l| l.length >= 3 && signed_area(l).abs >= MIN_AREA }
+      return nil if loops.empty?
+      d = loops.map { |loop| loop_to_path(loop, dx, dy) }.join(' ')
+      %(<path d="#{d}" fill-rule="evenodd" fill="#{fill}"/>)
     end
 
     # --- geometry helpers --------------------------------------------------
 
     # Emit one <defs> block of grayscale <mask>s. Each is a white bbox rect with
-    # black silhouette paths on top — raster union handles overlaps for free.
-    def mask_defs(specs, dx, dy, width, height)
-      valid = specs.select { |s| s[:loops] && !s[:loops].empty? }
-      return [] if valid.empty?
-      lines = ['  <defs>']
-      valid.each do |spec|
-        lines << %(    <mask id="#{spec[:id]}" maskUnits="userSpaceOnUse">)
-        lines << %(      <rect width="#{fmt(width)}" height="#{fmt(height)}" fill="white"/>)
-        spec[:loops].each do |loop|
-          lines << %(      <path d="#{loop_to_path(loop, dx, dy)}" fill="black"/>)
-        end
-        lines << '    </mask>'
-      end
-      lines << '  </defs>'
-      lines
-    end
-
     # Returns [min_x, min_y, max_x, max_y], or all-nil if there are no points.
     def bounds(fills, edges, shadow_polys = [], shadow_lines = [])
       min_x = min_y = max_x = max_y = nil

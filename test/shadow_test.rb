@@ -154,6 +154,40 @@ area  = loops.sum { |l| Shadow.signed_area2d(l).abs }
 check('stacked step-shadow union is one loop', loops.length == 1)
 check('stacked step-shadow union area = 60', (area - 60.0).abs < 1e-3)
 
+puts 'Shadow#subtract_polygons'
+
+# Rectangle minus fully-contained rectangle → outer + inner hole loop.
+outer = [[0, 0], [10, 0], [10, 10], [0, 10]]
+hole  = [[3, 3], [7, 3], [7, 7], [3, 7]]
+loops = Shadow.subtract_polygons([outer], [hole])
+area  = loops.sum { |l| Shadow.signed_area2d(l) }.abs
+check('rect - contained rect yields outer + hole', loops.length == 2)
+check('rect - contained rect area = 100 - 16 = 84', (area - 84.0).abs < 1e-3)
+
+# Rectangle minus overlapping rectangle → single L-shape, no hole.
+big  = [[0, 0], [10, 0], [10, 10], [0, 10]]
+cut  = [[5, 5], [15, 5], [15, 15], [5, 15]]
+loops = Shadow.subtract_polygons([big], [cut])
+area  = loops.sum { |l| Shadow.signed_area2d(l).abs }
+check('rect - overlapping rect yields one L-shape', loops.length == 1)
+check('L-shape area = 100 - 25 = 75', (area - 75.0).abs < 1e-3)
+
+# Subtractor fully outside subject → subject unchanged.
+away = [[100, 100], [110, 100], [110, 110], [100, 110]]
+loops = Shadow.subtract_polygons([big], [away])
+check('rect - disjoint rect = rect', loops.length == 1)
+check('disjoint subtraction preserves area', (Shadow.signed_area2d(loops[0]).abs - 100.0).abs < 1e-3)
+
+# Subject fully inside subtractor → empty.
+tiny = [[4, 4], [6, 4], [6, 6], [4, 6]]
+loops = Shadow.subtract_polygons([tiny], [big])
+check('subject inside subtractor vanishes', loops.empty?)
+
+# Empty subtractor → union behaviour on subjects.
+loops = Shadow.subtract_polygons([sqA, sqB], [])
+area  = loops.sum { |l| Shadow.signed_area2d(l).abs }
+check('empty subtractor falls back to union', loops.length == 1 && (area - 7.0).abs < 1e-3)
+
 puts
 if $failures.zero?
   puts 'ALL TESTS PASSED'

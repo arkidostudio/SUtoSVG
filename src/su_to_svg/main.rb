@@ -315,6 +315,7 @@ module SUtoSVG
       build_face_shadows(view, adapter, compute_face_shadows(model, world_faces)).each do |g|
         mask = projected.select { |f| f[:depth] < g[:depth] - 1e-4 }
                         .map { |f| f[:loops2d].first }
+        mask += g[:holes] if g[:holes]
         items << [g[:depth], 1, { polys: g[:polys], mask_loops: mask }]
       end
     end
@@ -427,24 +428,28 @@ module SUtoSVG
       plane_pt = [recv.center.x, recv.center.y, recv.center.z]
 
       polys = []
+      holes = [] # projected caster INNER loops → light passes through here
       world_faces.each do |caster|
         next if caster.equal?(recv)
         cn = [caster.normal.x, caster.normal.y, caster.normal.z]
         cc = [caster.center.x, caster.center.y, caster.center.z]
         dist = dot3(n, [cc[0] - plane_pt[0], cc[1] - plane_pt[1], cc[2] - plane_pt[2]])
         next if dist.abs < 1e-4 && dot3(cn, n).abs > 0.999 # skip coplanar casters
-        loop3 = caster.loops.first.map { |p| [p.x, p.y, p.z] }
-        # Keep only the part of the caster on the sun side of the receiver plane,
-        # so casters that straddle it (typical for vertical receivers) still cast.
-        clipped = Shadow.clip_to_halfspace(loop3, plane_pt, n)
-        next if clipped.length < 3
-        proj = Shadow.project_loop_to_plane(clipped, dir, plane_pt, n)
-        next if proj.nil?
-        polys << proj.map { |q| Geom::Point3d.new(q[0], q[1], q[2]) }
+        caster.loops.each_with_index do |loop, li|
+          loop3 = loop.map { |p| [p.x, p.y, p.z] }
+          # Keep only the part of the caster on the sun side of the receiver plane,
+          # so casters that straddle it (typical for vertical receivers) still cast.
+          clipped = Shadow.clip_to_halfspace(loop3, plane_pt, n)
+          next if clipped.length < 3
+          proj = Shadow.project_loop_to_plane(clipped, dir, plane_pt, n)
+          next if proj.nil?
+          pts = proj.map { |q| Geom::Point3d.new(q[0], q[1], q[2]) }
+          (li.zero? ? polys : holes) << pts
+        end
       end
       next if polys.empty?
       clip = recv.loops.first.map { |p| Geom::Point3d.new(p.x, p.y, p.z) }
-      groups << { clip: clip, polys: polys, center: recv.center }
+      groups << { clip: clip, polys: polys, holes: holes, center: recv.center }
     end
     groups
   end
@@ -460,12 +465,17 @@ module SUtoSVG
       polys2d = []
       g[:polys].each do |loop|
         next if loop.any? { |p| Projector.behind_camera?(view, p) }
-        # Bake the receiving-face clip in NOW (pure-Ruby 2D clip), so the SVG
-        # gets a plain pre-trimmed shape — no clipPath masks to untangle.
         clipped = Shadow.clip_polygon(loop.map { |p| adapter.project(p.to_a) }, clip2d)
         polys2d << SvgWriter::Face.new([clipped], gray) if clipped.length >= 3
       end
-      out << { depth: Projector.depth(view, g[:center]), polys: polys2d } unless polys2d.empty?
+      next if polys2d.empty?
+      # Projected caster inner loops (light gaps) → knock them out as extra
+      # mask entries so shadows land INSIDE cavities correctly.
+      holes2d = (g[:holes] || []).map do |loop|
+        next if loop.any? { |p| Projector.behind_camera?(view, p) }
+        Shadow.clip_polygon(loop.map { |p| adapter.project(p.to_a) }, clip2d)
+      end.compact.select { |l| l.length >= 3 }
+      out << { depth: Projector.depth(view, g[:center]), polys: polys2d, holes: holes2d }
     end
     out
   end

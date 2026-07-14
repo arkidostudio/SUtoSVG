@@ -252,6 +252,118 @@ module SUtoSVG
       inside
     end
 
+    # Boolean difference: union(subjects) - union(subtractors). Returns
+    # boundary loops (outer CCW, holes CW) for a fill-rule="evenodd" path.
+    # Same edge-splitting framework as union — split every crossing + every
+    # T-junction across BOTH sets, then filter sub-edges by which side lies in
+    # the resulting region and which side lies outside.
+    def subtract_polygons(subjects, subtractors)
+      subs = subjects.select { |p| p.length >= 3 && signed_area2d(p).abs > 1e-9 }
+                    .map { |p| signed_area2d(p) >= 0 ? p : p.reverse }
+      subt = subtractors.select { |p| p.length >= 3 && signed_area2d(p).abs > 1e-9 }
+                        .map { |p| signed_area2d(p) >= 0 ? p : p.reverse }
+      return [] if subs.empty?
+      return union_polygons(subs) if subt.empty?
+
+      edges = [] # [a, b, poly_idx, :sub|:cut]
+      subs.each_with_index { |p, pi| p.each_index { |i| edges << [p[i], p[(i + 1) % p.length], pi, :sub] } }
+      subt.each_with_index { |p, pi| p.each_index { |i| edges << [p[i], p[(i + 1) % p.length], pi, :cut] } }
+
+      splits = split_edges(edges, subs + subt, subs.length)
+      segs = build_subsegs(edges, splits)
+
+      kept = []
+      segs.each do |a, b, _pi, kind|
+        mx = (a[0] + b[0]) * 0.5; my = (a[1] + b[1]) * 0.5
+        dx = b[0] - a[0]; dy = b[1] - a[1]
+        len = Math.sqrt(dx * dx + dy * dy)
+        next if len < 1e-9
+        eps = 1e-4
+        lx = mx - dy / len * eps; ly = my + dx / len * eps # left (interior of source)
+        rx = mx + dy / len * eps; ry = my - dx / len * eps # right (exterior of source)
+        left  = in_any?(lx, ly, subs) && !in_any?(lx, ly, subt)
+        right = in_any?(rx, ry, subs) && !in_any?(rx, ry, subt)
+        if left && !right
+          kept << [a, b]
+        elsif right && !left
+          kept << [b, a] # reversed so the region stays on the walker's LEFT
+        end
+      end
+      kept = dedup_segs(kept)
+      walk_loops2d(kept.map { |a, b| [a, b, nil] })
+    end
+
+    # Shared helpers --------------------------------------------------------
+
+    # For every edge, collect split points from crossings with OTHER-polygon
+    # edges plus every OTHER-polygon vertex that lies on the edge (T-junction).
+    # `boundary` is which polygon each edge belongs to — same-polygon crossings
+    # are skipped. `cut_offset` marks where subtractor polygons start in a
+    # combined [subs..., subt...] list; edges from different KINDS still count
+    # as "other" for splitting.
+    def split_edges(edges, all_polys, cut_offset = nil)
+      splits = Array.new(edges.length) { [] }
+      edges.each_with_index do |e1, i|
+        ((i + 1)...edges.length).each do |j|
+          e2 = edges[j]
+          # Same polygon = skip (adjacency intersections aren't real crossings).
+          next if e1[2] == e2[2] && (cut_offset.nil? || e1[3] == e2[3])
+          pt = seg_intersect(e1[0], e1[1], e2[0], e2[1])
+          next unless pt
+          splits[i] << pt
+          splits[j] << pt
+        end
+      end
+      all_polys.each_with_index do |poly, pk|
+        poly.each do |v|
+          edges.each_with_index do |(a, b, pj, kind), i|
+            same = cut_offset ? (kind == :sub ? pj : pj + cut_offset) == pk : pj == pk
+            next if same
+            dx = b[0] - a[0]; dy = b[1] - a[1]
+            len2 = dx * dx + dy * dy
+            next if len2 < 1e-9
+            t = ((v[0] - a[0]) * dx + (v[1] - a[1]) * dy).to_f / len2
+            next if t < 1e-6 || t > 1 - 1e-6
+            px = a[0] + t * dx; py = a[1] + t * dy
+            next if (v[0] - px)**2 + (v[1] - py)**2 > 1e-6
+            splits[i] << [px, py]
+          end
+        end
+      end
+      splits
+    end
+
+    def build_subsegs(edges, splits)
+      out = []
+      edges.each_with_index do |edge, i|
+        a, b = edge[0], edge[1]
+        dx = b[0] - a[0]; dy = b[1] - a[1]
+        pts = [a, *splits[i], b]
+              .uniq { |p| [p[0].round(6), p[1].round(6)] }
+              .sort_by { |p| (p[0] - a[0]) * dx + (p[1] - a[1]) * dy }
+        pts.each_cons(2) do |p, q|
+          next if (p[0] - q[0]).abs < 1e-9 && (p[1] - q[1]).abs < 1e-9
+          out << [p, q, edge[2], edge[3]]
+        end
+      end
+      out
+    end
+
+    def dedup_segs(segs)
+      seen = {}
+      segs.reject do |a, b|
+        key = [a[0].round(4), a[1].round(4), b[0].round(4), b[1].round(4)]
+        rev = [b[0].round(4), b[1].round(4), a[0].round(4), a[1].round(4)]
+        if seen[key] || seen[rev] then true
+        else seen[key] = true; false
+        end
+      end
+    end
+
+    def in_any?(x, y, polys)
+      polys.any? { |p| point_in_polygon2d?(x, y, p) }
+    end
+
     # Walk directed sub-segments into closed loops. At a junction pick the
     # sharpest LEFT turn — that keeps the union's interior on the walker's
     # left throughout, producing the outer boundary + any hole loops.

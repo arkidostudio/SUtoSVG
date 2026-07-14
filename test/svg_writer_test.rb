@@ -92,18 +92,25 @@ check('overlapping cast pieces merge via evenodd', svg5.include?('fill-rule="eve
 svg_so = SvgWriter.build([cast], [], margin: 0.0)
 check('shadow-only fills use the shadow-faces layer id', svg_so.include?('id="shadow-faces"'))
 
-# Face-shadows with mask_loops emit an SVG <mask> and reference it.
+# Face-shadows with mask_loops have the mask BAKED IN via polygon subtraction.
+# The output is a plain path with no <mask>/mask=... anywhere, and the visible
+# area is the shadow minus the mask silhouette.
 masked = { polys: [Face.new([[[10, 10], [40, 10], [40, 40], [10, 40]]], '#c0c0c0')],
            mask_loops: [[[15, 5], [25, 5], [25, 45], [15, 45]]] }
 svg_m = SvgWriter.build([masked], [], margin: 0.0)
-check('mask defs emitted for face-shadow', svg_m.include?('<mask id="mask-fs-0"'))
-check('face-shadow references its mask', svg_m.include?('mask="url(#mask-fs-0)"'))
+check('baked face-shadow has no <mask> element', !svg_m.include?('<mask'))
+check('baked face-shadow has no mask= attr',    !svg_m.include?('mask='))
+# Shadow was 30×30 = 900; mask strip is x∈[15,25] across the whole shadow →
+# remove 10×30 = 300, leaving 600. Roughly a bbox 50×50 minus a 10-wide strip.
+check('baked face-shadow shape still visible', svg_m.include?('<path d="M'))
 
-# Ground shadow with ground_mask emits mask-ground and references it.
+# Ground shadow with ground_mask: subtraction baked into the emitted shape too.
 gpoly = Face.new([[[0, 0], [100, 0], [100, 20], [0, 20]]], '#c0c0c0')
 svg_g = SvgWriter.build([], [], shadow_polys: [gpoly],
                         ground_mask: [[[40, 0], [60, 0], [60, 20], [40, 20]]], margin: 0.0)
-check('ground shadow references mask-ground', svg_g.include?('mask="url(#mask-ground)"'))
+check('baked ground shadow has no <mask>/mask=',
+      !svg_g.include?('<mask') && !svg_g.include?('mask='))
+check('ground shadow still emits a path', svg_g.include?('<path'))
 
 # A single, pre-unioned face (with a hole) is drawn directly, honouring the hole.
 holed = Face.new([[[0, 0], [40, 0], [40, 40], [0, 40]], [[10, 10], [30, 10], [30, 30], [10, 30]]], '#c0c0c0')
