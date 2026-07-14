@@ -96,13 +96,22 @@ check('shadow-only fills use the shadow-faces layer id', svg_so.include?('id="sh
 # The output is a plain path with no <mask>/mask=... anywhere, and the visible
 # area is the shadow minus the mask silhouette.
 masked = { polys: [Face.new([[[10, 10], [40, 10], [40, 40], [10, 40]]], '#c0c0c0')],
-           mask_loops: [[[15, 5], [25, 5], [25, 45], [15, 45]]] }
+           mask_faces: [[[15, 5], [25, 5], [25, 45], [15, 45]]] }
 svg_m = SvgWriter.build([masked], [], margin: 0.0)
 check('baked face-shadow has no <mask> element', !svg_m.include?('<mask'))
 check('baked face-shadow has no mask= attr',    !svg_m.include?('mask='))
 # Shadow was 30×30 = 900; mask strip is x∈[15,25] across the whole shadow →
 # remove 10×30 = 300, leaving 600. Roughly a bbox 50×50 minus a 10-wide strip.
 check('baked face-shadow shape still visible', svg_m.include?('<path d="M'))
+
+# Multi-loop mask face (outer + hole): the hole re-adds visibility. Shadow
+# is fully covered by the mask outer, but a slot in the mask lets it show.
+covered = { polys: [Face.new([[[0, 0], [20, 0], [20, 20], [0, 20]]], '#c0c0c0')],
+            mask_faces: [[[[0, 0], [20, 0], [20, 20], [0, 20]],   # outer covers whole shadow
+                          [[7, 7], [13, 7], [13, 13], [7, 13]]]] } # slot 6×6 in the middle
+svg_slot = SvgWriter.build([covered], [], margin: 0.0)
+check('shadow visible through mask hole', svg_slot.include?('<path d="M'))
+check('no mask/clipPath emitted', !svg_slot.include?('<mask') && !svg_slot.include?('clipPath'))
 
 # Ground shadow with ground_mask: subtraction baked into the emitted shape too.
 gpoly = Face.new([[[0, 0], [100, 0], [100, 20], [0, 20]]], '#c0c0c0')

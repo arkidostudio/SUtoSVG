@@ -233,7 +233,7 @@ module SUtoSVG
 
     # 2D silhouettes of every face — mask the ground shadow so it doesn't
     # bleed through the building (which has no opaque fill any more).
-    silhouettes = projected.map { |f| f[:loops2d].first }
+    silhouettes = projected.map { |f| f[:loops2d] }
 
     svg = SvgWriter.build(fills, svg_edges, margin: SVG_MARGIN,
                           shadow_polys: shadow_polys, shadow_lines: shadow_lines,
@@ -301,22 +301,24 @@ module SUtoSVG
     gray = blended_shadow_gray
 
     # Self-shadow: unlit faces are uniformly in shadow — emit each whole face
-    # silhouette as a shadow shape.
+    # silhouette as a shadow shape. The mask uses each nearer face's FULL
+    # loops2d (outer + holes), so light through a nearer occluder's hole
+    # re-reveals the shadow behind — e.g. the cavity walls visible through the
+    # mailbox slot.
     projected.each do |f|
       n = f[:plane][1]
       next if (n[0] * s[0] + n[1] * s[1] + n[2] * s[2]) > 0.0 # lit, skip
       mask = projected.select { |o| o[:depth] < f[:depth] - 1e-4 }
-                      .map { |o| o[:loops2d].first }
+                      .map { |o| o[:loops2d] }
       items << [f[:depth], 0, { polys: [SvgWriter::Face.new(f[:loops2d], gray)],
-                                mask_loops: mask }]
+                                mask_faces: mask }]
     end
 
     if RECEIVE_ON_FACES
       build_face_shadows(view, adapter, compute_face_shadows(model, world_faces)).each do |g|
         mask = projected.select { |f| f[:depth] < g[:depth] - 1e-4 }
-                        .map { |f| f[:loops2d].first }
-        mask += g[:holes] if g[:holes]
-        items << [g[:depth], 1, { polys: g[:polys], mask_loops: mask }]
+                        .map { |f| f[:loops2d] }
+        items << [g[:depth], 1, { polys: g[:polys], mask_faces: mask }]
       end
     end
 
@@ -430,28 +432,24 @@ module SUtoSVG
       plane_pt = [recv.center.x, recv.center.y, recv.center.z]
 
       polys = []
-      holes = [] # projected caster INNER loops → light passes through here
       world_faces.each do |caster|
         next if caster.equal?(recv)
         cn = [caster.normal.x, caster.normal.y, caster.normal.z]
         cc = [caster.center.x, caster.center.y, caster.center.z]
         dist = dot3(n, [cc[0] - plane_pt[0], cc[1] - plane_pt[1], cc[2] - plane_pt[2]])
         next if dist.abs < 1e-4 && dot3(cn, n).abs > 0.999 # skip coplanar casters
-        caster.loops.each_with_index do |loop, li|
-          loop3 = loop.map { |p| [p.x, p.y, p.z] }
-          # Keep only the part of the caster on the sun side of the receiver plane,
-          # so casters that straddle it (typical for vertical receivers) still cast.
-          clipped = Shadow.clip_to_halfspace(loop3, plane_pt, n)
-          next if clipped.length < 3
-          proj = Shadow.project_loop_to_plane(clipped, dir, plane_pt, n)
-          next if proj.nil?
-          pts = proj.map { |q| Geom::Point3d.new(q[0], q[1], q[2]) }
-          (li.zero? ? polys : holes) << pts
-        end
+        # Outer loop only. Inner loops (slots, holes) are dead-end cutouts, not
+        # light paths through the caster — projecting them made phantom gaps.
+        loop3 = caster.loops.first.map { |p| [p.x, p.y, p.z] }
+        clipped = Shadow.clip_to_halfspace(loop3, plane_pt, n)
+        next if clipped.length < 3
+        proj = Shadow.project_loop_to_plane(clipped, dir, plane_pt, n)
+        next if proj.nil?
+        polys << proj.map { |q| Geom::Point3d.new(q[0], q[1], q[2]) }
       end
       next if polys.empty?
       clip = recv.loops.first.map { |p| Geom::Point3d.new(p.x, p.y, p.z) }
-      groups << { clip: clip, polys: polys, holes: holes, center: recv.center }
+      groups << { clip: clip, polys: polys, center: recv.center }
     end
     groups
   end
@@ -470,14 +468,7 @@ module SUtoSVG
         clipped = Shadow.clip_polygon(loop.map { |p| adapter.project(p.to_a) }, clip2d)
         polys2d << SvgWriter::Face.new([clipped], gray) if clipped.length >= 3
       end
-      next if polys2d.empty?
-      # Projected caster inner loops (light gaps) → knock them out as extra
-      # mask entries so shadows land INSIDE cavities correctly.
-      holes2d = (g[:holes] || []).map do |loop|
-        next if loop.any? { |p| Projector.behind_camera?(view, p) }
-        Shadow.clip_polygon(loop.map { |p| adapter.project(p.to_a) }, clip2d)
-      end.compact.select { |l| l.length >= 3 }
-      out << { depth: Projector.depth(view, g[:center]), polys: polys2d, holes: holes2d }
+      out << { depth: Projector.depth(view, g[:center]), polys: polys2d } unless polys2d.empty?
     end
     out
   end

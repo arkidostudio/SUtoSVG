@@ -252,28 +252,33 @@ module SUtoSVG
       inside
     end
 
-    # Boolean difference: union(subjects) - union(subtractors). Returns
-    # boundary loops (outer CCW, holes CW) for a fill-rule="evenodd" path.
-    # Same edge-splitting framework as union — split every crossing + every
-    # T-junction across BOTH sets, then filter sub-edges by which side lies in
-    # the resulting region and which side lies outside.
-    def subtract_polygons(subjects, subtractors)
+    # Boolean difference: union(subjects) - (union(subtractors) - union(gaps)).
+    # `gaps` are light-gap loops (e.g. holes in an occluding face) that punch
+    # through the subtractor region so subjects behind the gap remain visible.
+    # Returns boundary loops (outer CCW, holes CW) for a fill-rule="evenodd"
+    # path.
+    def subtract_polygons(subjects, subtractors, gaps = [])
       subs = subjects.select { |p| p.length >= 3 && signed_area2d(p).abs > 1e-9 }
                     .map { |p| signed_area2d(p) >= 0 ? p : p.reverse }
       subt = subtractors.select { |p| p.length >= 3 && signed_area2d(p).abs > 1e-9 }
                         .map { |p| signed_area2d(p) >= 0 ? p : p.reverse }
+      gaps = gaps.select { |p| p.length >= 3 && signed_area2d(p).abs > 1e-9 }
+                 .map { |p| signed_area2d(p) >= 0 ? p : p.reverse }
       return [] if subs.empty?
       return union_polygons(subs) if subt.empty?
 
-      edges = [] # [a, b, poly_idx, :sub|:cut]
+      # Edge indices: subs occupy [0, subs.length), subt then [subs.length, subs.length + subt.length),
+      # gaps last. split_edges treats different kinds as "other" for T-junctions.
+      edges = []
       subs.each_with_index { |p, pi| p.each_index { |i| edges << [p[i], p[(i + 1) % p.length], pi, :sub] } }
-      subt.each_with_index { |p, pi| p.each_index { |i| edges << [p[i], p[(i + 1) % p.length], pi, :cut] } }
+      subt.each_with_index { |p, pi| p.each_index { |i| edges << [p[i], p[(i + 1) % p.length], subs.length + pi, :cut] } }
+      gaps.each_with_index { |p, pi| p.each_index { |i| edges << [p[i], p[(i + 1) % p.length], subs.length + subt.length + pi, :gap] } }
 
-      splits = split_edges(edges, subs + subt, subs.length)
+      splits = split_edges(edges, subs + subt + gaps)
       segs = build_subsegs(edges, splits)
 
       kept = []
-      segs.each do |a, b, _pi, kind|
+      segs.each do |a, b, _pi, _kind|
         mx = (a[0] + b[0]) * 0.5; my = (a[1] + b[1]) * 0.5
         dx = b[0] - a[0]; dy = b[1] - a[1]
         len = Math.sqrt(dx * dx + dy * dy)
@@ -281,8 +286,8 @@ module SUtoSVG
         eps = 1e-4
         lx = mx - dy / len * eps; ly = my + dx / len * eps # left (interior of source)
         rx = mx + dy / len * eps; ry = my - dx / len * eps # right (exterior of source)
-        left  = in_any?(lx, ly, subs) && !in_any?(lx, ly, subt)
-        right = in_any?(rx, ry, subs) && !in_any?(rx, ry, subt)
+        left  = in_st?(lx, ly, subs, subt, gaps)
+        right = in_st?(rx, ry, subs, subt, gaps)
         if left && !right
           kept << [a, b]
         elsif right && !left
@@ -293,21 +298,26 @@ module SUtoSVG
       walk_loops2d(kept.map { |a, b| [a, b, nil] })
     end
 
+    # Is (x, y) inside the S-T region? subject union minus subtractor union,
+    # with gaps re-adding visibility inside the subtractor.
+    def in_st?(x, y, subs, subt, gaps)
+      return false unless in_any?(x, y, subs)
+      !in_any?(x, y, subt) || in_any?(x, y, gaps)
+    end
+
     # Shared helpers --------------------------------------------------------
 
     # For every edge, collect split points from crossings with OTHER-polygon
     # edges plus every OTHER-polygon vertex that lies on the edge (T-junction).
-    # `boundary` is which polygon each edge belongs to — same-polygon crossings
-    # are skipped. `cut_offset` marks where subtractor polygons start in a
-    # combined [subs..., subt...] list; edges from different KINDS still count
-    # as "other" for splitting.
-    def split_edges(edges, all_polys, cut_offset = nil)
+    # `all_polys` is the FLAT list of every polygon in the operation, indexed by
+    # the same `pi` we stamped on each edge. Same-polygon crossings and vertices
+    # are skipped so adjacency along a poly's own boundary isn't split.
+    def split_edges(edges, all_polys)
       splits = Array.new(edges.length) { [] }
       edges.each_with_index do |e1, i|
         ((i + 1)...edges.length).each do |j|
           e2 = edges[j]
-          # Same polygon = skip (adjacency intersections aren't real crossings).
-          next if e1[2] == e2[2] && (cut_offset.nil? || e1[3] == e2[3])
+          next if e1[2] == e2[2]
           pt = seg_intersect(e1[0], e1[1], e2[0], e2[1])
           next unless pt
           splits[i] << pt
@@ -316,9 +326,8 @@ module SUtoSVG
       end
       all_polys.each_with_index do |poly, pk|
         poly.each do |v|
-          edges.each_with_index do |(a, b, pj, kind), i|
-            same = cut_offset ? (kind == :sub ? pj : pj + cut_offset) == pk : pj == pk
-            next if same
+          edges.each_with_index do |(a, b, pj, _kind), i|
+            next if pj == pk
             dx = b[0] - a[0]; dy = b[1] - a[1]
             len2 = dx * dx + dy * dy
             next if len2 < 1e-9

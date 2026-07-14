@@ -71,9 +71,13 @@ module SUtoSVG
         if item.is_a?(Hash)
           outers, holes = split_outers_and_holes(item[:polys])
           next if outers.empty?
-          cutters = holes + (item[:mask_loops] || [])
-          visible = cutters.empty? ? Shadow.union_polygons(outers)
-                                   : Shadow.subtract_polygons(outers, cutters)
+          mask_outers, mask_gaps = split_mask_faces(item[:mask_faces] || [])
+          cutters = holes + mask_outers
+          visible = if cutters.empty? && mask_gaps.empty?
+                      Shadow.union_polygons(outers)
+                    else
+                      Shadow.subtract_polygons(outers, cutters, mask_gaps)
+                    end
           shadow_polys_all.concat(visible)
           shadow_fill_color ||= item[:polys].first.fill
         elsif visible?(item)
@@ -81,13 +85,15 @@ module SUtoSVG
         end
       end
 
-      # Ground shadow: subtract the object silhouettes (and any per-caster
-      # holes) so it doesn't bleed through the building. Tone baked into the
-      # fill via blended_shadow_gray.
-      ground_outers, ground_holes = split_outers_and_holes(shadow_polys)
-      ground_cutters = ground_holes + ground_mask
-      ground_visible = ground_cutters.empty? ? Shadow.union_polygons(ground_outers)
-                                             : Shadow.subtract_polygons(ground_outers, ground_cutters)
+      # Ground shadow: subtract every object silhouette so it doesn't bleed
+      # through the building; holes in those silhouettes act as light gaps.
+      ground_outers, _ = split_outers_and_holes(shadow_polys)
+      mask_outers, mask_gaps = split_mask_faces(ground_mask)
+      ground_visible = if mask_outers.empty? && mask_gaps.empty?
+                        Shadow.union_polygons(ground_outers)
+                      else
+                        Shadow.subtract_polygons(ground_outers, mask_outers, mask_gaps)
+                      end
       unless ground_visible.empty? && shadow_lines.empty?
         out << %(  <g id="shadow-ground" inkscape:groupmode="layer" ) +
                %(inkscape:label="shadow-ground">)
@@ -163,6 +169,25 @@ module SUtoSVG
         s += ax * by - bx * ay
       end
       s * 0.5
+    end
+
+    # Mask faces are Array of loops (loops[0] outer, rest holes). Outer loops
+    # become subtractors (occluders); inner loops become light-gap re-adders.
+    # Backward-compat: a plain flat loop (Array of [x, y]) is treated as an
+    # outer-only silhouette with no holes.
+    def split_mask_faces(mask_faces)
+      outers = []
+      gaps   = []
+      mask_faces.each do |face|
+        next if face.nil? || face.empty?
+        # Detect: is `face` an Array-of-loops (multi-loop face) or a flat loop?
+        loops = face.first.is_a?(Array) && face.first.first.is_a?(Numeric) ? [face] : face
+        loops.each_with_index do |loop, i|
+          next if loop.nil? || loop.length < 3 || signed_area(loop).abs < MIN_AREA
+          (i.zero? ? outers : gaps) << loop
+        end
+      end
+      [outers, gaps]
     end
 
     # Split a Face list into its outer loops (the shadow shapes) and its inner

@@ -188,6 +188,21 @@ loops = Shadow.subtract_polygons([sqA, sqB], [])
 area  = loops.sum { |l| Shadow.signed_area2d(l).abs }
 check('empty subtractor falls back to union', loops.length == 1 && (area - 7.0).abs < 1e-3)
 
+# Gap: subtractor with a light-gap hole punches a "shadow-through" region.
+# subject = 20×20, subtractor = full 20×20 covering it, gap = 8×8 in the middle.
+# Naked subtraction gives ∅; with the gap it's an 8×8 region visible through.
+subject = [[0, 0], [20, 0], [20, 20], [0, 20]]
+cover   = [[0, 0], [20, 0], [20, 20], [0, 20]]
+slot    = [[6, 6], [14, 6], [14, 14], [6, 14]]
+loops = Shadow.subtract_polygons([subject], [cover], [slot])
+area  = loops.sum { |l| Shadow.signed_area2d(l).abs }
+check('gap re-adds visibility through subtractor', loops.length == 1 && (area - 64.0).abs < 1e-3)
+
+# Gap outside subtractor is a no-op.
+loops = Shadow.subtract_polygons([subject], [], [slot])
+area  = loops.sum { |l| Shadow.signed_area2d(l).abs }
+check('gap without subtractor is a no-op', (area - 400.0).abs < 1e-3)
+
 puts
 if $failures.zero?
   puts 'ALL TESTS PASSED'
