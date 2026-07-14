@@ -13,7 +13,8 @@ module SUtoSVG
     #   center : Geom::Point3d (world), centroid of the outer loop.
     #   front  : Sketchup::Material or nil (front material).
     #   back   : Sketchup::Material or nil (back material).
-    WorldFace = Struct.new(:loops, :normal, :center, :front, :back)
+    #   entity : the underlying Sketchup::Face (identity for raytest comparisons).
+    WorldFace = Struct.new(:loops, :normal, :center, :front, :back, :entity)
 
   # An edge resolved to world space.
   #   a, b         : Geom::Point3d endpoints (world).
@@ -78,7 +79,8 @@ module SUtoSVG
         face.normal.transform(tr).normalize,
         centroid(loops.first),
         face.material,
-        face.back_material
+        face.back_material,
+        face
       )
     end
 
