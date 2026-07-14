@@ -102,6 +102,34 @@ check('outside polygon clips to nothing',
 r = Shadow.clip_polygon(over, box.reverse)
 check('clockwise clip winding is normalized', r.length >= 3 && r.map { |p| p[0] }.max <= 10 + 1e-6)
 
+puts 'Shadow#union_polygons'
+
+# Two overlapping squares → one L-shape with the right area.
+sqA = [[0, 0], [2, 0], [2, 2], [0, 2]]
+sqB = [[1, 1], [3, 1], [3, 3], [1, 3]]
+loops = Shadow.union_polygons([sqA, sqB])
+area = loops.sum { |l| Shadow.signed_area2d(l).abs }
+check('two overlapping squares union to one loop', loops.length == 1)
+check('L-shape union area = 7 (4 + 4 - 1)', (area - 7.0).abs < 1e-3)
+
+# Fully-contained polygon disappears.
+outer = [[0, 0], [3, 0], [3, 3], [0, 3]]
+inner = [[0.5, 0.5], [1.5, 0.5], [1.5, 1.5], [0.5, 1.5]]
+loops = Shadow.union_polygons([outer, inner])
+check('contained polygon disappears', loops.length == 1)
+check('outer area preserved', (Shadow.signed_area2d(loops[0]).abs - 9.0).abs < 1e-3)
+
+# Disjoint → two loops.
+d1 = [[0, 0], [1, 0], [1, 1], [0, 1]]
+d2 = [[5, 5], [6, 5], [6, 6], [5, 6]]
+loops = Shadow.union_polygons([d1, d2])
+check('disjoint polygons stay as two loops', loops.length == 2)
+
+# CW input is normalized to CCW output.
+cw = [[0, 0], [0, 2], [2, 2], [2, 0]]
+loops = Shadow.union_polygons([cw])
+check('CW polygon normalizes to CCW', loops.length == 1 && Shadow.signed_area2d(loops[0]) > 0)
+
 puts
 if $failures.zero?
   puts 'ALL TESTS PASSED'

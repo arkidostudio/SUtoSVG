@@ -74,7 +74,7 @@ check('ground shadow gets its own labelled layer',
       svg4.include?('id="shadow-ground"') && svg4.include?('inkscape:label="shadow-ground"'))
 check('ground shadow is merged into one path (not many polygons)',
       svg4.scan(/<path/).length == 1 && !svg4.include?('<polygon'))
-check('merged path uses nonzero union', svg4.include?('fill-rule="nonzero"'))
+check('merged path uses evenodd union', svg4.include?('fill-rule="evenodd"'))
 check('shadow layer is drawn before (under) the edges',
       svg4.index('id="shadow-ground"') < svg4.index('id="edges-thin"'))
 
@@ -86,7 +86,7 @@ cast = { polys: [Face.new([[[22, 2], [34, 2], [34, 18], [22, 18]]], '#c0c0c0'),
 svg5 = SvgWriter.build([face_white, cast], [], margin: 0.0)
 check('faces + cast shadows share the faces layer', svg5.include?('id="faces"'))
 check('unmasked cast shadow carries no mask attribute', !svg5.include?('mask='))
-check('overlapping cast pieces merge via nonzero', svg5.include?('fill-rule="nonzero"'))
+check('overlapping cast pieces merge via evenodd', svg5.include?('fill-rule="evenodd"'))
 
 # Shadow-only input (no face fills) uses the shadow-faces layer id.
 svg_so = SvgWriter.build([cast], [], margin: 0.0)
@@ -121,9 +121,9 @@ svg6 = SvgWriter.build([flat_face, real_face, { polys: [flat_shadow] }, { polys:
                        [], shadow_polys: [flat_shadow], margin: 0.0)
 check('zero-area faces are culled', svg6.scan(/<polygon/).length == 1)
 check('edge-on ground shadow omits the whole layer', !svg6.include?('shadow-ground'))
-check('degenerate pieces + duplicate loops collapse to one nonzero subpath',
-      svg6.scan(/fill-rule="nonzero"/).length == 1 &&
-      svg6[/d="([^"]*)" fill-rule="nonzero"/, 1].scan(/M/).length == 1)
+check('degenerate pieces + duplicate loops collapse to one evenodd subpath',
+      svg6.scan(/fill-rule="evenodd"/).length == 1 &&
+      svg6[/d="([^"]*)" fill-rule="evenodd"/, 1].scan(/M/).length == 1)
 
 # Number formatting: trailing zeros stripped, decimals kept.
 check('fmt strips trailing zeros', SvgWriter.fmt(30.0) == '30')

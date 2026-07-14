@@ -127,5 +127,148 @@ module SUtoSVG
       end
       s * 0.5
     end
+
+    # --- 2D polygon boolean union ------------------------------------------
+
+    # Union an array of simple 2D polygons (each [[x,y], ...]) into an array of
+    # boundary loops. Outer loops CCW, holes CW — the caller can emit them as
+    # one compound path with fill-rule="evenodd". Handles overlapping/adjacent
+    # polygons; degenerate/empty input returns [].
+    #
+    # Algorithm: split every edge at every crossing with edges of OTHER polys,
+    # keep sub-edges whose exterior-side midpoint isn't inside any polygon,
+    # then walk the kept sub-edges into closed loops. Pairwise O(n²) — fine for
+    # the ~hundreds of shadow edges we produce per export.
+    def union_polygons(polys)
+      polys = polys.select { |p| p.length >= 3 && signed_area2d(p).abs > 1e-9 }
+                   .map { |p| signed_area2d(p) >= 0 ? p : p.reverse }
+      return [] if polys.empty?
+
+      edges = []
+      polys.each_with_index do |poly, pi|
+        poly.each_index { |i| edges << [poly[i], poly[(i + 1) % poly.length], pi] }
+      end
+
+      splits = Array.new(edges.length) { [] }
+      edges.each_with_index do |e1, i|
+        ((i + 1)...edges.length).each do |j|
+          e2 = edges[j]
+          next if e1[2] == e2[2]
+          pt = seg_intersect(e1[0], e1[1], e2[0], e2[1])
+          next unless pt
+          splits[i] << pt
+          splits[j] << pt
+        end
+      end
+
+      segs = []
+      edges.each_with_index do |(a, b, pi), i|
+        dx = b[0] - a[0]; dy = b[1] - a[1]
+        pts = [a, *splits[i], b]
+              .uniq { |p| [p[0].round(6), p[1].round(6)] }
+              .sort_by { |p| (p[0] - a[0]) * dx + (p[1] - a[1]) * dy }
+        pts.each_cons(2) do |p, q|
+          next if (p[0] - q[0]).abs < 1e-9 && (p[1] - q[1]).abs < 1e-9
+          segs << [p, q, pi]
+        end
+      end
+
+      # Keep sub-segments on the union boundary: exterior midpoint (right side
+      # for a CCW polygon) must NOT lie inside any other polygon.
+      kept = segs.select do |a, b, pi|
+        mx = (a[0] + b[0]) * 0.5; my = (a[1] + b[1]) * 0.5
+        dx = b[0] - a[0]; dy = b[1] - a[1]
+        len = Math.sqrt(dx * dx + dy * dy)
+        next false if len < 1e-9
+        eps = 1e-4
+        nx =  dy / len; ny = -dx / len
+        px = mx + nx * eps; py = my + ny * eps
+        polys.each_with_index.none? { |p, k| k != pi && point_in_polygon2d?(px, py, p) }
+      end
+
+      # Coincident boundary segments (shared edge of touching / duplicated
+      # polygons) all survive the filter — collapse both same-direction and
+      # reverse duplicates down to one.
+      seen = {}
+      kept = kept.reject do |a, b, _|
+        key = [a[0].round(4), a[1].round(4), b[0].round(4), b[1].round(4)]
+        rev = [b[0].round(4), b[1].round(4), a[0].round(4), a[1].round(4)]
+        if seen[key] || seen[rev]
+          true
+        else
+          seen[key] = true
+          false
+        end
+      end
+
+      walk_loops2d(kept)
+    end
+
+    # Line-segment intersection (open — endpoints on either segment don't
+    # count). Returns [x,y] or nil.
+    def seg_intersect(p1, p2, p3, p4)
+      x1, y1 = p1; x2, y2 = p2; x3, y3 = p3; x4, y4 = p4
+      denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+      return nil if denom.abs < 1e-12
+      t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)).to_f / denom
+      u = ((x1 - x3) * (y1 - y2) - (y1 - y3) * (x1 - x2)).to_f / denom
+      return nil if t < 1e-9 || t > 1 - 1e-9 || u < 1e-9 || u > 1 - 1e-9
+      [x1 + t * (x2 - x1), y1 + t * (y2 - y1)]
+    end
+
+    # Standard ray-cast point-in-polygon.
+    def point_in_polygon2d?(x, y, poly)
+      inside = false
+      n = poly.length
+      j = n - 1
+      n.times do |i|
+        xi, yi = poly[i]; xj, yj = poly[j]
+        if ((yi > y) != (yj > y)) &&
+           (x < (xj - xi) * (y - yi).to_f / (yj - yi) + xi)
+          inside = !inside
+        end
+        j = i
+      end
+      inside
+    end
+
+    # Walk directed sub-segments into closed loops. At a junction pick the
+    # sharpest LEFT turn — that keeps the union's interior on the walker's
+    # left throughout, producing the outer boundary + any hole loops.
+    def walk_loops2d(segs)
+      return [] if segs.empty?
+      round = ->(p) { [p[0].round(4), p[1].round(4)] }
+      by_start = Hash.new { |h, k| h[k] = [] }
+      segs.each { |seg| by_start[round.call(seg[0])] << seg }
+
+      used = {}
+      loops = []
+      segs.each do |start_seg|
+        next if used[start_seg]
+        loop_pts = []
+        cur = start_seg
+        limit = segs.length + 1
+        while cur && !used[cur] && limit > 0
+          used[cur] = true
+          loop_pts << cur[0]
+          limit -= 1
+          key = round.call(cur[1])
+          break if key == round.call(start_seg[0]) && loop_pts.length >= 3
+          candidates = by_start[key].reject { |s| used[s] }
+          break if candidates.empty?
+          if candidates.length == 1
+            cur = candidates[0]
+          else
+            in_dir = Math.atan2(cur[1][1] - cur[0][1], cur[1][0] - cur[0][0])
+            cur = candidates.max_by do |c|
+              out_dir = Math.atan2(c[1][1] - c[0][1], c[1][0] - c[0][0])
+              (out_dir - in_dir) % (2 * Math::PI) # largest CCW turn = sharpest left
+            end
+          end
+        end
+        loops << loop_pts if loop_pts.length >= 3
+      end
+      loops
+    end
   end
 end

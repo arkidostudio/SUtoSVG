@@ -1,3 +1,5 @@
+require_relative 'shadow'
+
 # SUtoSVG — SVG document builder.
 #
 # Pure Ruby, NO SketchUp dependency, so it can be unit-tested with a plain
@@ -163,17 +165,18 @@ module SUtoSVG
       faces.length == 1 ? face_element(faces.first, dx, dy) : union_path(faces, dx, dy)
     end
 
-    # Merge many (overlapping) polygons into ONE <path>: each outer loop becomes
-    # a subpath, all wound the same way, filled nonzero so the result is their
-    # union — contiguous pieces read as one shape, no internal seams. Degenerate
-    # (zero-area) loops are dropped; exact duplicate loops collapse to one.
+    # Merge many overlapping polygons into ONE clean <path> — a REAL 2D boolean
+    # union via Shadow.union_polygons, so the SVG carries the outer boundary
+    # (and any hole loops) rather than a stack of overlapping subpaths. Outer
+    # loops CCW / holes CW → fill-rule="evenodd" renders correctly.
     def union_path(faces, dx, dy)
-      loops = faces.map { |f| normalize_winding(f.loops[0] || []) }
+      loops = faces.map { |f| f.loops[0] || [] }
                    .select { |l| l.length >= 3 && signed_area(l).abs >= MIN_AREA }
-      loops = loops.uniq { |l| l.map { |(x, y)| [x.round(2), y.round(2)] }.sort }
       return nil if loops.empty?
-      d = loops.map { |loop| loop_to_path(loop, dx, dy) }.join(' ')
-      %(<path d="#{d}" fill-rule="nonzero" fill="#{faces.first.fill}"/>)
+      unioned = Shadow.union_polygons(loops)
+      return nil if unioned.empty?
+      d = unioned.map { |loop| loop_to_path(loop, dx, dy) }.join(' ')
+      %(<path d="#{d}" fill-rule="evenodd" fill="#{faces.first.fill}"/>)
     end
 
     # A face is worth drawing if its outer loop encloses visible area.
