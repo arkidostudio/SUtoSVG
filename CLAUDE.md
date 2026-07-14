@@ -128,10 +128,21 @@ Both write into the repo root; `.gitignore` keeps them out of commits.
 
 ## Known open threads
 
-- **Shadow bleed-through inside interior extrusions** — a face whose caster's
-  outer loop encloses the receiver but whose *inner* loops don't project. The
-  writer would need to project all loops of a multi-loop caster, not just
-  `caster.loops.first`. Not yet fixed.
+- **Shadows inside indents / cavities are not rendered.** A face whose normal
+  points at the sun but which sits behind another occluder (mailbox cavity's
+  back wall behind the mailbox front) is classified as "lit" by the
+  normal-only heuristic, so no self-shadow is emitted. Masks use outer
+  silhouettes only — a hole in an occluder isn't treated as a light-passing
+  gap because we can't cheaply distinguish a real light path (open cavity)
+  from a dead-end cutout (slot into a solid box). Two failed attempts on
+  branch history: (a) reclassify by `model.raytest` from face centre — over-
+  fires on adjacent tower geometry; (b) raytest from hole centre in the light
+  direction and only apply the gap to the receiver actually hit — misses the
+  cavity back wall when it's smaller than the ray's angular spread and hits
+  the tower behind instead, putting a phantom slot-shaped hole in the tower's
+  cast shadow. A robust fix probably needs a per-face sun-visibility test
+  restricted to faces that geometrically OCCLUDE (not just intersect) the
+  sun ray, or a proper shadow-volume pass.
 - **Sun-side clipping is per-caster half-space**, not full 3D occlusion — a
   caster geometrically shadowed by another caster still contributes. Real 3D
   shadow HLR would need a proper shadow-volume test.
