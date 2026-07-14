@@ -267,7 +267,6 @@ module SUtoSVG
 
       loops2d = wf.loops.map { |loop| loop.map { |p| adapter.project(p.to_a) } }
       out << {
-        wf:      wf,
         loops2d: loops2d,
         bbox2d:  bbox2d(loops2d),
         plane:   [wf.center.to_a, wf.normal.to_a],
@@ -302,29 +301,24 @@ module SUtoSVG
     gray = blended_shadow_gray
 
     # Self-shadow: unlit faces are uniformly in shadow — emit each whole face
-    # silhouette as a shadow shape. Nearer occluders mask it. A hole in an
-    # occluder is treated as a light-passing gap ONLY when a ray from the hole
-    # in the light direction actually hits THIS receiver (not some other face);
-    # otherwise it's a dead-end cutout and the mask stays solid. That's what
-    # keeps the mailbox slot from punching a phantom hole in the tower's cast
-    # shadow while still letting the cavity's back-wall shadow show through.
+    # silhouette as a shadow shape. Mask uses only OUTER silhouettes of nearer
+    # faces (no slot-as-gap): a hole in an occluder doesn't reliably pass light
+    # through to the receiver behind (the mailbox slot goes into a cavity, not
+    # through to the tower), so treating it as a gap creates phantom holes in
+    # shadows landing on farther receivers.
     projected.each do |f|
       n = f[:plane][1]
       next if (n[0] * s[0] + n[1] * s[1] + n[2] * s[2]) > 0.0 # lit, skip
-      mask = build_mask(model, projected, f, s)
+      mask = projected.select { |o| o[:depth] < f[:depth] - 1e-4 }
+                      .map { |o| o[:loops2d].first }
       items << [f[:depth], 0, { polys: [SvgWriter::Face.new(f[:loops2d], gray)],
                                 mask_faces: mask }]
     end
 
     if RECEIVE_ON_FACES
       build_face_shadows(view, adapter, compute_face_shadows(model, world_faces)).each do |g|
-        recv_proj = projected.find { |p| p[:wf].equal?(g[:recv]) } if g[:recv]
-        mask = if recv_proj
-                 build_mask(model, projected, recv_proj, s)
-               else
-                 projected.select { |p| p[:depth] < g[:depth] - 1e-4 }
-                          .map { |p| p[:loops2d].first }
-               end
+        mask = projected.select { |f| f[:depth] < g[:depth] - 1e-4 }
+                        .map { |f| f[:loops2d].first }
         items << [g[:depth], 1, { polys: g[:polys], mask_faces: mask }]
       end
     end
@@ -456,7 +450,7 @@ module SUtoSVG
       end
       next if polys.empty?
       clip = recv.loops.first.map { |p| Geom::Point3d.new(p.x, p.y, p.z) }
-      groups << { clip: clip, polys: polys, center: recv.center, recv: recv }
+      groups << { clip: clip, polys: polys, center: recv.center }
     end
     groups
   end
@@ -475,48 +469,9 @@ module SUtoSVG
         clipped = Shadow.clip_polygon(loop.map { |p| adapter.project(p.to_a) }, clip2d)
         polys2d << SvgWriter::Face.new([clipped], gray) if clipped.length >= 3
       end
-      out << { depth: Projector.depth(view, g[:center]), polys: polys2d, recv: g[:recv] } unless polys2d.empty?
+      out << { depth: Projector.depth(view, g[:center]), polys: polys2d } unless polys2d.empty?
     end
     out
-  end
-
-  # Build a mask (Array of loops2d) for the given receiver `recv_proj`. Each
-  # nearer occluder contributes its outer silhouette by default; if the
-  # occluder has holes AND a light ray through any hole lands on this receiver,
-  # the hole is included too as a light gap.
-  def build_mask(model, projected, recv_proj, sundir)
-    projected.select { |p| p[:depth] < recv_proj[:depth] - 1e-4 }.map do |p|
-      if p[:loops2d].length > 1 && hole_reaches?(model, p[:wf], recv_proj[:wf], sundir)
-        p[:loops2d]        # outer + hole loops → gaps
-      else
-        p[:loops2d].first  # outer only
-      end
-    end
-  end
-
-  # Does light passing through any hole of `occluder` (a WorldFace with inner
-  # loops) actually land on `receiver`? Ray-tests from each hole's centroid
-  # along the light direction and returns true when the first hit face IS the
-  # receiver — so dead-end cutouts (mailbox slot into a solid box) score false
-  # while real cavity openings score true.
-  def hole_reaches?(model, occluder, receiver, sundir)
-    return false if occluder.loops.length <= 1
-    light = Geom::Vector3d.new(-sundir[0], -sundir[1], -sundir[2])
-    occluder.loops[1..-1].each do |hole|
-      cx = cy = cz = 0.0
-      hole.each { |p| cx += p.x; cy += p.y; cz += p.z }
-      n = hole.length
-      cx /= n; cy /= n; cz /= n
-      # Nudge along the light direction so we don't self-hit the occluder plane.
-      origin = Geom::Point3d.new(cx + light.x * 0.001,
-                                 cy + light.y * 0.001,
-                                 cz + light.z * 0.001)
-      hit = model.raytest([origin, light], true)
-      next unless hit
-      hit_face = hit[1].reverse.find { |e| e.is_a?(Sketchup::Face) }
-      return true if hit_face && receiver.entity && hit_face.entityID == receiver.entity.entityID
-    end
-    false
   end
 
   def dot3(a, b)
