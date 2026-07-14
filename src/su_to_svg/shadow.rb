@@ -161,6 +161,26 @@ module SUtoSVG
         end
       end
 
+      # T-junctions: when a vertex of one polygon sits on the interior of
+      # another polygon's edge (a very common case in projected step shadows),
+      # split that edge there. Without this, partially-coincident boundaries
+      # both survive the boundary filter → duplicate edges → spurious loops.
+      polys.each_with_index do |poly, pi|
+        poly.each do |v|
+          edges.each_with_index do |(a, b, pj), i|
+            next if pj == pi
+            dx = b[0] - a[0]; dy = b[1] - a[1]
+            len2 = dx * dx + dy * dy
+            next if len2 < 1e-9
+            t = ((v[0] - a[0]) * dx + (v[1] - a[1]) * dy).to_f / len2
+            next if t < 1e-6 || t > 1 - 1e-6
+            px = a[0] + t * dx; py = a[1] + t * dy
+            next if (v[0] - px)**2 + (v[1] - py)**2 > 1e-6
+            splits[i] << [px, py]
+          end
+        end
+      end
+
       segs = []
       edges.each_with_index do |(a, b, pi), i|
         dx = b[0] - a[0]; dy = b[1] - a[1]

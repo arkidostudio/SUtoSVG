@@ -130,6 +130,30 @@ cw = [[0, 0], [0, 2], [2, 2], [2, 0]]
 loops = Shadow.union_polygons([cw])
 check('CW polygon normalizes to CCW', loops.length == 1 && Shadow.signed_area2d(loops[0]) > 0)
 
+# T-junction: horizontal rect + vertical rect sharing partial bottom-left edges.
+# Vertex-on-edge cases are the norm in projected step-shadow geometry.
+horiz = [[0, 0], [10, 0], [10, 3], [0, 3]]
+vert  = [[0, 0], [6, 0], [6, 5], [0, 5]]
+loops = Shadow.union_polygons([horiz, vert])
+area  = loops.sum { |l| Shadow.signed_area2d(l).abs }
+check('T-junction union yields exactly one loop', loops.length == 1)
+check('T-junction union area = 42 (30 + 30 - 18)', (area - 42.0).abs < 1e-3)
+# Step corner (6, 3) must survive as a real vertex on the boundary.
+check('T-junction step corner preserved',
+      loops[0].any? { |x, y| (x - 6).abs < 1e-3 && (y - 3).abs < 1e-3 })
+
+# Chain of stepped quads (like tower step shadows) — expect one clean stair loop.
+steps = [
+  [[0, 0], [12, 0], [12, 2], [0, 2]],
+  [[0, 0], [10, 0], [10, 4], [0, 4]],
+  [[0, 0], [8,  0], [8,  6], [0, 6]]
+]
+loops = Shadow.union_polygons(steps)
+area  = loops.sum { |l| Shadow.signed_area2d(l).abs }
+# Union area: (12*2) + (10 * 2) + (8 * 2) = 60. (each next step adds a strip of width * 2)
+check('stacked step-shadow union is one loop', loops.length == 1)
+check('stacked step-shadow union area = 60', (area - 60.0).abs < 1e-3)
+
 puts
 if $failures.zero?
   puts 'ALL TESTS PASSED'
